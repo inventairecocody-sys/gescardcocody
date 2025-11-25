@@ -1,32 +1,27 @@
-// db/db.js
-const sql = require("mssql");
+// db/db.js - VERSION POSTGRESQL RAILWAY
+const { Pool } = require('pg');
 const dotenv = require("dotenv");
-dotenv.config(); // charge les variables d'environnement
+dotenv.config();
 
-// Configuration SQL Server
-const config = {
-  user: process.env.DB_USER,            // utilisateur SQL
-  password: process.env.DB_PASSWORD,    // mot de passe SQL
-  server: process.env.DB_SERVER,        // serveur SQL
-  database: process.env.DB_DATABASE,    // base de données
-  port: process.env.DB_PORT || 1433,    // port SQL (par défaut 1433)
-  options: {
-    encrypt: true,                      // si connexion encryptée
-    trustServerCertificate: true,       // autorise certificat auto-signé
+// Configuration PostgreSQL pour Railway
+const connectionString = process.env.DATABASE_URL;
+
+const pool = new Pool({
+  connectionString: connectionString,
+  ssl: {
+    rejectUnauthorized: false
   },
-};
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
+  max: 20
+});
 
-// Création d'un pool de connexion
-const poolPromise = new sql.ConnectionPool(config)
-  .connect()
-  .then((pool) => {
-    console.log("✅ Connexion SQL Server réussie");
-    return pool;
-  })
-  .catch((err) => {
-    console.error("❌ Erreur SQL Server", err);
-    throw err;
-  });
+// Test de connexion au démarrage
+pool.query('SELECT NOW()')
+  .then(() => console.log('✅ Connexion PostgreSQL Railway établie'))
+  .catch(err => console.error('❌ Erreur PostgreSQL:', err));
 
-// 🟢 Corrigé : on exporte aussi l'objet `sql`
-module.exports = { sql, poolPromise };
+// Fonction utilitaire pour exécuter des requêtes
+const query = (text, params) => pool.query(text, params);
+
+module.exports = { pool, query };

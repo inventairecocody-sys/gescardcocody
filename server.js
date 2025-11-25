@@ -3,7 +3,8 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 dotenv.config();
 
-const { poolPromise } = require("./db/db");
+const { pool, query } = require("./db/db");
+const generateHash = require("./generate-hash");
 
 // Import des routes
 const authRoutes = require("./routes/authRoutes");
@@ -15,12 +16,17 @@ const utilisateursRoutes = require("./routes/utilisateurs");
 const profilRoutes = require("./routes/profils");
 const inventaireRoutes = require("./routes/Inventaire");
 const statistiquesRoutes = require("./routes/statistiques");
-const externalApiRoutes = require("./routes/externalApi"); // 🆕 NOUVEAU IMPORT
+const externalApiRoutes = require("./routes/externalApi");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: "http://localhost:5173" }));
+// CORS pour production et développement
+app.use(cors({ 
+  origin: process.env.NODE_ENV === 'production' 
+    ? ["https://votre-frontend.vercel.app", "http://localhost:5173"]
+    : "http://localhost:5173"
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -30,26 +36,26 @@ app.use((req, res, next) => {
   next();
 });
 
-// Vérification DB
-poolPromise
-  .then(() => console.log("✅ SQL Server connecté"))
-  .catch((err) => console.error("❌ Erreur SQL Server :", err));
+// Test de connexion PostgreSQL
+pool.query('SELECT NOW()')
+  .then((res) => console.log('✅ PostgreSQL connecté - Heure serveur:', res.rows[0].now))
+  .catch((err) => console.error('❌ Erreur PostgreSQL:', err));
 
 // Test DB
 app.get("/api/test-db", async (req, res) => {
   try {
-    const pool = await poolPromise;
-    const result = await pool.request().query("SELECT 1 as test");
-    res.json({ message: "✅ Connexion DB réussie", data: result.recordset });
+    const result = await query("SELECT 1 as test");
+    res.json({ message: "✅ Connexion PostgreSQL réussie", data: result.rows });
   } catch (err) {
-    res.status(500).json({ message: "❌ Erreur DB", error: err.message });
+    res.status(500).json({ message: "❌ Erreur PostgreSQL", error: err.message });
   }
 });
 
 // Racine API
 app.get("/api", (req, res) => {
   res.json({
-    message: "🚀 API CartesProject",
+    message: "🚀 API CartesProject - PostgreSQL Edition",
+    database: "PostgreSQL Railway",
     routes: {
       public: ["GET /api/test-db", "POST /api/auth/login"],
       protected: [
@@ -64,7 +70,7 @@ app.get("/api", (req, res) => {
         "GET /api/statistiques/detail",
         "POST /api/statistiques/refresh"
       ],
-      external: [ // 🆕 NOUVELLES ROUTES EXTERNES
+      external: [
         "GET /api/external/health",
         "GET /api/external/cartes",
         "POST /api/external/sync", 
@@ -84,10 +90,10 @@ app.use("/api/journal", journalRoutes);
 app.use("/api/log", logRoutes);
 app.use("/api/profil", profilRoutes);
 app.use("/api/statistiques", statistiquesRoutes);
-app.use("/api/external", externalApiRoutes); // 🆕 NOUVELLE ROUTE
+app.use("/api/external", externalApiRoutes);
 
 // Route test racine
-app.get("/", (req, res) => res.send("🚀 API CartesProject en ligne !"));
+app.get("/", (req, res) => res.send("🚀 API CartesProject PostgreSQL en ligne !"));
 
 // 404
 app.use((req, res) =>
@@ -103,7 +109,7 @@ app.use((err, req, res, next) => {
   console.error("Erreur serveur:", err);
   res.status(500).json({
     message: "Erreur interne du serveur",
-    error: process.env.NODE_ENV === "development" ? err.message : {}
+    error: process.env.NODE_ENV === 'development' ? err.message : {}
   });
 });
 
@@ -111,5 +117,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
   console.log(`📖 Documentation: http://localhost:${PORT}/api`);
-  console.log(`🌐 API Externe: http://localhost:${PORT}/api/external`);
+  console.log(`🌐 Environnement: ${process.env.NODE_ENV || 'development'}`);
 });
