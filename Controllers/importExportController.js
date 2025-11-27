@@ -1,4 +1,4 @@
-const { poolPromise, sql } = require('../db/db');
+const db = require('../db/db');
 const ExcelJS = require('exceljs');
 const fs = require('fs');
 const path = require('path');
@@ -55,7 +55,7 @@ class ImportResult {
       errors: this.errors,
       totalProcessed: this.totalProcessed,
       successRate: this.totalProcessed > 0 ? Math.round((this.imported / this.totalProcessed) * 100) : 0,
-      importBatchID: this.importBatchID,
+      importBatchID: importBatchID,
       duration: `${Math.round(duration / 1000)}s`
     };
   }
@@ -199,14 +199,14 @@ class FileHelper {
   }
 }
 
-// 🎯 SERVICE PRINCIPAL - VERSION CORRIGÉE
+// 🎯 SERVICE PRINCIPAL - VERSION POSTGRESQL
 class CarteImportExportService {
   /**
-   * Import d'un fichier Excel - VERSION CORRIGÉE
+   * Import d'un fichier Excel - VERSION POSTGRESQL
    */
   static async importExcel(req, res) {
     console.time('⏱️ Import Excel');
-    console.log('🚀 DEBUT IMPORT - Version corrigée');
+    console.log('🚀 DEBUT IMPORT - Version PostgreSQL');
     
     if (!req.file) {
       return res.status(400).json({
@@ -216,8 +216,11 @@ class CarteImportExportService {
     }
 
     const importBatchID = uuidv4();
+    const client = await db.getClient();
     
     try {
+      await client.query('BEGIN');
+      
       console.log('📁 Fichier reçu:', {
         name: req.file.originalname,
         size: req.file.size,
@@ -225,9 +228,10 @@ class CarteImportExportService {
         importBatchID: importBatchID
       });
 
-      // 🔥 CORRECTION : Vérification req.user
+      // Vérification req.user
       if (!req.user) {
         FileHelper.safeDelete(req.file.path);
+        await client.query('ROLLBACK');
         return res.status(401).json({
           success: false,
           error: 'Utilisateur non authentifié'
@@ -260,6 +264,7 @@ class CarteImportExportService {
       
       if (missingHeaders.length > 0) {
         FileHelper.safeDelete(req.file.path);
+        await client.query('ROLLBACK');
         
         await journalController.logAction({
           utilisateurId: req.user.id,
@@ -285,8 +290,9 @@ class CarteImportExportService {
 
       // Traitement
       const result = new ImportResult(importBatchID);
-      await this.processImport(worksheet, headers, result, req, importBatchID);
+      await this.processImport(client, worksheet, headers, result, req, importBatchID);
       
+      await client.query('COMMIT');
       FileHelper.safeDelete(req.file.path);
       console.timeEnd('⏱️ Import Excel');
 
@@ -315,6 +321,7 @@ class CarteImportExportService {
       });
 
     } catch (error) {
+      await client.query('ROLLBACK');
       FileHelper.safeDelete(req.file.path);
       console.error('❌ Erreur import:', error);
       
@@ -336,15 +343,15 @@ class CarteImportExportService {
         error: 'Erreur lors de l\'import: ' + error.message,
         importBatchID: importBatchID
       });
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Processus d'import principal - CORRIGÉ
+   * Processus d'import principal - POSTGRESQL
    */
-  static async processImport(worksheet, headers, result, req, importBatchID) {
-    const pool = await poolPromise;
-
+  static async processImport(client, worksheet, headers, result, req, importBatchID) {
     console.log(`🎯 Début traitement de ${worksheet.rowCount - 1} lignes`);
 
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
@@ -360,7 +367,7 @@ class CarteImportExportService {
         }
 
         result.totalProcessed++;
-        await this.processSingleRow(rowData, rowNumber, pool, result, req, importBatchID);
+        await this.processSingleRow(client, rowData, rowNumber, result, req, importBatchID);
 
       } catch (error) {
         result.addError(`Ligne ${rowNumber}: Erreur inattendue - ${error.message}`);
@@ -372,15 +379,10 @@ class CarteImportExportService {
   }
 
   /**
-   * Traitement d'une seule ligne - CORRIGÉ
+   * Traitement d'une seule ligne - POSTGRESQL
    */
-  static async processSingleRow(rowData, rowNumber, pool, result, req, importBatchID) {
-    let transaction;
-    
+  static async processSingleRow(client, rowData, rowNumber, result, req, importBatchID) {
     try {
-      transaction = new sql.Transaction(pool);
-      await transaction.begin();
-
       // Mapping des données
       const mappedData = {
         "LIEU D'ENROLEMENT": rowData["LIEU D'ENROLEMENT"] || '',
@@ -401,29 +403,26 @@ class CarteImportExportService {
       if (validationErrors.length > 0) {
         result.errorDetails.push(...validationErrors);
         result.errors++;
-        await transaction.rollback();
         return;
       }
 
       // Nettoyage
       const cleanedData = this.cleanRowData(mappedData);
 
-      // Vérifier les doublons
-      const duplicateCheck = await transaction.request()
-        .input('nom', sql.NVarChar(255), cleanedData.NOM)
-        .input('prenoms', sql.NVarChar(255), cleanedData.PRENOMS)
-        .query('SELECT COUNT(*) as count FROM Cartes WHERE NOM = @nom AND PRENOMS = @prenoms');
+      // Vérifier les doublons - POSTGRESQL
+      const duplicateCheck = await client.query(
+        'SELECT COUNT(*) as count FROM cartes WHERE nom = $1 AND prenoms = $2',
+        [cleanedData.NOM, cleanedData.PRENOMS]
+      );
 
-      if (duplicateCheck.recordset[0].count > 0) {
+      if (parseInt(duplicateCheck.rows[0].count) > 0) {
         console.log(`⚠️ Ligne ${rowNumber} doublon ignoré: ${cleanedData.NOM} ${cleanedData.PRENOMS}`);
         result.duplicates++;
-        await transaction.rollback();
         return;
       }
 
-      // Insertion avec ImportBatchID
-      const carteId = await this.insertRowData(cleanedData, transaction, importBatchID);
-      await transaction.commit();
+      // Insertion avec ImportBatchID - POSTGRESQL
+      const carteId = await this.insertRowData(client, cleanedData, importBatchID);
 
       result.imported++;
 
@@ -452,14 +451,6 @@ class CarteImportExportService {
       }
 
     } catch (error) {
-      if (transaction) {
-        try {
-          await transaction.rollback();
-        } catch (rollbackError) {
-          console.warn(`⚠️ Rollback échoué ligne ${rowNumber}:`, rollbackError.message);
-        }
-      }
-
       const errorMsg = `Ligne ${rowNumber}: ${error.message}`;
       result.addError(errorMsg);
       console.error(`❌ Erreur ligne ${rowNumber}:`, error.message);
@@ -467,57 +458,45 @@ class CarteImportExportService {
   }
 
   /**
-   * Insertion d'une ligne de données - CORRIGÉ
+   * Insertion d'une ligne de données - POSTGRESQL
    */
-  static async insertRowData(data, transaction, importBatchID) {
-    const request = transaction.request();
+  static async insertRowData(client, data, importBatchID) {
+    const result = await client.query(`
+      INSERT INTO cartes (
+        "LIEU D'ENROLEMENT", "SITE DE RETRAIT", rangement, nom, prenoms,
+        "DATE DE NAISSANCE", "LIEU NAISSANCE", contact, delivrance,
+        "CONTACT DE RETRAIT", "DATE DE DELIVRANCE", importbatchid
+      ) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      RETURNING id
+    `, [
+      data["LIEU D'ENROLEMENT"] || '',
+      data["SITE DE RETRAIT"] || '',
+      data["RANGEMENT"] || '',
+      data["NOM"] || '',
+      data["PRENOMS"] || '',
+      data["DATE DE NAISSANCE"] ? new Date(data["DATE DE NAISSANCE"]) : null,
+      data["LIEU NAISSANCE"] || '',
+      data["CONTACT"] || '',
+      data["DELIVRANCE"] || '',
+      data["CONTACT DE RETRAIT"] || '',
+      data["DATE DE DELIVRANCE"] ? new Date(data["DATE DE DELIVRANCE"]) : null,
+      importBatchID
+    ]);
 
-    const sqlParams = {
-      'LIEU_D_ENROLEMENT': [sql.NVarChar(255), data["LIEU D'ENROLEMENT"] || ''],
-      'SITE_DE_RETRAIT': [sql.NVarChar(255), data["SITE DE RETRAIT"] || ''],
-      'RANGEMENT': [sql.NVarChar(100), data["RANGEMENT"] || ''],
-      'NOM': [sql.NVarChar(255), data["NOM"] || ''],
-      'PRENOMS': [sql.NVarChar(255), data["PRENOMS"] || ''],
-      'DATE_DE_NAISSANCE': [sql.Date, data["DATE DE NAISSANCE"] ? new Date(data["DATE DE NAISSANCE"]) : null],
-      'LIEU_NAISSANCE': [sql.NVarChar(255), data["LIEU NAISSANCE"] || ''],
-      'CONTACT': [sql.NVarChar(20), data["CONTACT"] || ''],
-      'DELIVRANCE': [sql.NVarChar(255), data["DELIVRANCE"] || ''],
-      'CONTACT_DE_RETRAIT': [sql.NVarChar(255), data["CONTACT DE RETRAIT"] || ''],
-      'DATE_DE_DELIVRANCE': [sql.Date, data["DATE DE DELIVRANCE"] ? new Date(data["DATE DE DELIVRANCE"]) : null],
-      'IMPORT_BATCH_ID': [sql.UniqueIdentifier, importBatchID]
-    };
-
-    Object.entries(sqlParams).forEach(([key, [type, value]]) => {
-      request.input(key, type, value);
-    });
-
-    const result = await request.query(`
-      INSERT INTO Cartes (
-        [LIEU D'ENROLEMENT], [SITE DE RETRAIT], RANGEMENT, NOM, PRENOMS,
-        [DATE DE NAISSANCE], [LIEU NAISSANCE], CONTACT, DELIVRANCE,
-        [CONTACT DE RETRAIT], [DATE DE DELIVRANCE], ImportBatchID
-      ) VALUES (
-        @LIEU_D_ENROLEMENT, @SITE_DE_RETRAIT, @RANGEMENT, @NOM, @PRENOMS,
-        @DATE_DE_NAISSANCE, @LIEU_NAISSANCE, @CONTACT, @DELIVRANCE,
-        @CONTACT_DE_RETRAIT, @DATE_DE_DELIVRANCE, @IMPORT_BATCH_ID
-      );
-      SELECT SCOPE_IDENTITY() AS ID;
-    `);
-
-    return result.recordset[0].ID;
+    return result.rows[0].id;
   }
 
-  // 🔥 MÉTHODES D'EXPORT (CONSERVÉES INTACTES)
+  // 🔥 MÉTHODES D'EXPORT (ADAPTÉES POUR POSTGRESQL)
   static async exportAll(req, res) {
     try {
-      const pool = await poolPromise;
-      const result = await pool.request().query(
-        'SELECT * FROM Cartes ORDER BY ID'
+      const result = await db.query(
+        'SELECT * FROM cartes ORDER BY id'
       );
 
-      console.log(`📊 Toutes les cartes à exporter: ${result.recordset.length} lignes`);
+      console.log(`📊 Toutes les cartes à exporter: ${result.rows.length} lignes`);
       
-      const normalizedData = this.normalizeSQLData(result.recordset);
+      const normalizedData = this.normalizeSQLData(result.rows);
       const filename = FileHelper.generateFilename('toutes-les-cartes');
       
       // Journaliser l'export
@@ -530,7 +509,7 @@ class CarteImportExportService {
         actionType: 'EXPORT_CARTES',
         tableName: 'Cartes',
         ip: req.ip,
-        details: `Export complet - ${result.recordset.length} cartes - Fichier: ${filename}`
+        details: `Export complet - ${result.rows.length} cartes - Fichier: ${filename}`
       });
 
       await this.exportToExcel(res, normalizedData, filename);
@@ -548,34 +527,32 @@ class CarteImportExportService {
     try {
       console.log('🔍 Paramètres reçus pour export résultats:', req.query);
       
-      const pool = await poolPromise;
-      const request = pool.request();
-      
-      let query = 'SELECT * FROM Cartes WHERE 1=1';
+      let query = 'SELECT * FROM cartes WHERE 1=1';
       const conditions = [];
-      const params = {};
-      
+      const params = [];
+      let paramCount = 0;
+
       const filterMap = {
-        nom: { column: 'NOM', type: sql.NVarChar(255), operator: 'LIKE' },
-        prenom: { column: 'PRENOMS', type: sql.NVarChar(255), operator: 'LIKE' },
-        contact: { column: 'CONTACT', type: sql.NVarChar(20), operator: 'LIKE' },
-        siteRetrait: { column: '[SITE DE RETRAIT]', type: sql.NVarChar(255), operator: 'LIKE' },
-        lieuNaissance: { column: '[LIEU NAISSANCE]', type: sql.NVarChar(255), operator: 'LIKE' },
-        dateNaissance: { column: '[DATE DE NAISSANCE]', type: sql.Date, operator: '=' },
-        rangement: { column: 'RANGEMENT', type: sql.NVarChar(100), operator: 'LIKE' }
+        nom: { column: 'nom', operator: 'ILIKE' },
+        prenom: { column: 'prenoms', operator: 'ILIKE' },
+        contact: { column: 'contact', operator: 'ILIKE' },
+        siteRetrait: { column: '"SITE DE RETRAIT"', operator: 'ILIKE' },
+        lieuNaissance: { column: '"LIEU NAISSANCE"', operator: 'ILIKE' },
+        dateNaissance: { column: '"DATE DE NAISSANCE"', operator: '=' },
+        rangement: { column: 'rangement', operator: 'ILIKE' }
       };
 
       Object.entries(filterMap).forEach(([key, config]) => {
         if (req.query[key] && req.query[key].trim() !== '') {
-          const paramName = `param_${key}`;
+          paramCount++;
           let paramValue = req.query[key].trim();
           
-          if (config.operator === 'LIKE') {
+          if (config.operator === 'ILIKE') {
             paramValue = `%${paramValue}%`;
           }
           
-          conditions.push(`${config.column} ${config.operator} @${paramName}`);
-          params[paramName] = { type: config.type, value: paramValue };
+          conditions.push(`${config.column} ${config.operator} $${paramCount}`);
+          params.push(paramValue);
         }
       });
 
@@ -583,17 +560,13 @@ class CarteImportExportService {
         query += ' AND ' + conditions.join(' AND ');
       }
 
-      query += ' ORDER BY ID';
+      query += ' ORDER BY id';
       
-      Object.entries(params).forEach(([paramName, paramConfig]) => {
-        request.input(paramName, paramConfig.type, paramConfig.value);
-      });
-
       console.log('📝 Requête SQL générée:', query);
-      const result = await request.query(query);
-      console.log(`📊 Résultats à exporter: ${result.recordset.length} lignes`);
+      const result = await db.query(query, params);
+      console.log(`📊 Résultats à exporter: ${result.rows.length} lignes`);
 
-      const normalizedData = this.normalizeSQLData(result.recordset);
+      const normalizedData = this.normalizeSQLData(result.rows);
       const filename = FileHelper.generateFilename('resultats-recherche');
       
       // Journaliser l'export des résultats
@@ -606,7 +579,7 @@ class CarteImportExportService {
         actionType: 'EXPORT_RECHERCHE',
         tableName: 'Cartes',
         ip: req.ip,
-        details: `Export résultats recherche - ${result.recordset.length} cartes - Fichier: ${filename} - Critères: ${JSON.stringify(req.query)}`
+        details: `Export résultats recherche - ${result.rows.length} cartes - Fichier: ${filename} - Critères: ${JSON.stringify(req.query)}`
       });
       
       await this.exportToExcel(res, normalizedData, filename);
@@ -672,7 +645,7 @@ class CarteImportExportService {
     }
   }
 
-  // 🔧 MÉTHODES INTERNES (inchangées)
+  // 🔧 MÉTHODES INTERNES
   static async exportToExcel(res, data, filename) {
     console.time(`⏱️ Export ${filename}`);
     
@@ -759,12 +732,12 @@ class CarteImportExportService {
              value === null || value === undefined || value === '');
   }
 
-  static normalizeSQLData(recordset) {
-    if (!recordset || !Array.isArray(recordset)) {
+  static normalizeSQLData(rows) {
+    if (!rows || !Array.isArray(rows)) {
       return [];
     }
 
-    return recordset.map(record => {
+    return rows.map(record => {
       const normalized = {};
       CONFIG.columns.forEach(column => {
         let value = this.getSafeValue(record, column.key);

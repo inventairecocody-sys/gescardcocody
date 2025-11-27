@@ -1,4 +1,4 @@
-const { poolPromise, sql } = require('../db/db');
+const db = require('../db/db');
 
 class JournalController {
     
@@ -15,33 +15,32 @@ class JournalController {
                 tableName
             } = req.query;
 
-            const pool = await poolPromise;
             let query = `
                 SELECT 
-                    JournalID,
-                    UtilisateurID,
-                    NomUtilisateur,
-                    NomComplet,
-                    Role,
-                    Agence,
-                    DateAction,
-                    Action,
-                    TableAffectee,
-                    LigneAffectee,
-                    IPUtilisateur,
-                    Systeme,
-                    UserName,
-                    RoleUtilisateur,
-                    ActionType,
-                    TableName,
-                    RecordId,
-                    OldValue,
-                    NewValue,
-                    AdresseIP,
-                    UserId,
-                    ImportBatchID,
-                    DetailsAction
-                FROM dbo.JournalActivite 
+                    journalid,
+                    utilisateurid,
+                    nomutilisateur,
+                    nomcomplet,
+                    role,
+                    agence,
+                    dateaction,
+                    action,
+                    tableaffectee,
+                    ligneaffectee,
+                    iputilisateur,
+                    systeme,
+                    username,
+                    roleutilisateur,
+                    actiontype,
+                    tablename,
+                    recordid,
+                    oldvalue,
+                    newvalue,
+                    adresseip,
+                    userid,
+                    importbatchid,
+                    detailsaction
+                FROM journalactivite 
                 WHERE 1=1
             `;
             
@@ -51,68 +50,90 @@ class JournalController {
             // Appliquer les filtres
             if (dateDebut) {
                 paramCount++;
-                query += ` AND DateAction >= @dateDebut${paramCount}`;
-                params.push({ name: `dateDebut${paramCount}`, type: sql.DateTime, value: new Date(dateDebut) });
+                query += ` AND dateaction >= $${paramCount}`;
+                params.push(new Date(dateDebut));
             }
 
             if (dateFin) {
                 paramCount++;
-                query += ` AND DateAction <= @dateFin${paramCount}`;
-                params.push({ name: `dateFin${paramCount}`, type: sql.DateTime, value: new Date(dateFin + ' 23:59:59') });
+                query += ` AND dateaction <= $${paramCount}`;
+                params.push(new Date(dateFin + ' 23:59:59'));
             }
 
             if (utilisateur) {
                 paramCount++;
-                query += ` AND NomUtilisateur LIKE @utilisateur${paramCount}`;
-                params.push({ name: `utilisateur${paramCount}`, type: sql.NVarChar, value: `%${utilisateur}%` });
+                query += ` AND nomutilisateur ILIKE $${paramCount}`;
+                params.push(`%${utilisateur}%`);
             }
 
             if (actionType) {
                 paramCount++;
-                query += ` AND ActionType = @actionType${paramCount}`;
-                params.push({ name: `actionType${paramCount}`, type: sql.NVarChar, value: actionType });
+                query += ` AND actiontype = $${paramCount}`;
+                params.push(actionType);
             }
 
             if (tableName) {
                 paramCount++;
-                query += ` AND (TableName = @tableName${paramCount} OR TableAffectee = @tableName${paramCount})`;
-                params.push({ name: `tableName${paramCount}`, type: sql.NVarChar, value: tableName });
+                query += ` AND (tablename = $${paramCount} OR tableaffectee = $${paramCount})`;
+                params.push(tableName);
             }
 
-            // Pagination
+            // Pagination PostgreSQL
             const offset = (page - 1) * pageSize;
             query += `
-                ORDER BY DateAction DESC
-                OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY
+                ORDER BY dateaction DESC
+                LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
             `;
+            params.push(pageSize, offset);
 
-            const request = pool.request();
-            params.forEach(param => {
-                request.input(param.name, param.type, param.value);
-            });
-            
-            const logs = await request.query(query);
+            const logs = await db.query(query, params);
 
             // Compter le total pour la pagination
             let countQuery = `
-                SELECT COUNT(*) as total FROM dbo.JournalActivite WHERE 1=1
+                SELECT COUNT(*) as total FROM journalactivite WHERE 1=1
             `;
-            const countParams = params;
+            const countParams = [];
+            let countParamCount = 0;
 
-            const countRequest = pool.request();
-            countParams.forEach(param => {
-                countRequest.input(param.name, param.type, param.value);
-            });
-            
-            const totalResult = await countRequest.query(countQuery);
+            if (dateDebut) {
+                countParamCount++;
+                countQuery += ` AND dateaction >= $${countParamCount}`;
+                countParams.push(new Date(dateDebut));
+            }
+
+            if (dateFin) {
+                countParamCount++;
+                countQuery += ` AND dateaction <= $${countParamCount}`;
+                countParams.push(new Date(dateFin + ' 23:59:59'));
+            }
+
+            if (utilisateur) {
+                countParamCount++;
+                countQuery += ` AND nomutilisateur ILIKE $${countParamCount}`;
+                countParams.push(`%${utilisateur}%`);
+            }
+
+            if (actionType) {
+                countParamCount++;
+                countQuery += ` AND actiontype = $${countParamCount}`;
+                countParams.push(actionType);
+            }
+
+            if (tableName) {
+                countParamCount++;
+                countQuery += ` AND (tablename = $${countParamCount} OR tableaffectee = $${countParamCount})`;
+                countParams.push(tableName);
+            }
+
+            const totalResult = await db.query(countQuery, countParams);
 
             res.json({
-                logs: logs.recordset,
+                logs: logs.rows,
                 pagination: {
                     page: parseInt(page),
                     pageSize: parseInt(pageSize),
-                    total: totalResult.recordset[0].total,
-                    totalPages: Math.ceil(totalResult.recordset[0].total / pageSize)
+                    total: parseInt(totalResult.rows[0].total),
+                    totalPages: Math.ceil(parseInt(totalResult.rows[0].total) / pageSize)
                 }
             });
 
@@ -124,11 +145,10 @@ class JournalController {
 
     // Annuler une importation
     async annulerImportation(req, res) {
-        const pool = await poolPromise;
-        const transaction = new sql.Transaction(pool);
+        const client = await db.getClient();
         
         try {
-            await transaction.begin();
+            await client.query('BEGIN');
             
             const { importBatchID } = req.body;
             const utilisateurId = req.user.id;
@@ -138,94 +158,74 @@ class JournalController {
             const agence = req.user.Agence;
 
             // 1. Compter le nombre de cartes à supprimer
-            const countRequest = new sql.Request(transaction);
-            countRequest.input('importBatchID', sql.UniqueIdentifier, importBatchID);
-            const countResult = await countRequest.query(`
-                SELECT COUNT(*) as count FROM dbo.Cartes WHERE ImportBatchID = @importBatchID
-            `);
+            const countResult = await client.query(`
+                SELECT COUNT(*) as count FROM cartes WHERE importbatchid = $1
+            `, [importBatchID]);
 
-            const count = countResult.recordset[0].count;
+            const count = parseInt(countResult.rows[0].count);
 
             if (count === 0) {
-                await transaction.rollback();
+                await client.query('ROLLBACK');
                 return res.status(404).json({ error: 'Aucune carte trouvée pour ce batch d\'importation' });
             }
 
             // 2. Journaliser l'action avant suppression
-            const logRequest = new sql.Request(transaction);
-            await logRequest
-                .input('UtilisateurID', sql.Int, utilisateurId)
-                .input('NomUtilisateur', sql.NVarChar, nomUtilisateur)
-                .input('NomComplet', sql.NVarChar, nomComplet)
-                .input('Role', sql.NVarChar, role)
-                .input('Agence', sql.NVarChar, agence)
-                .input('DateAction', sql.DateTime, new Date())
-                .input('Action', sql.NVarChar, `Annulation importation batch ${importBatchID}`)
-                .input('TableAffectee', sql.NVarChar, 'Cartes')
-                .input('LigneAffectee', sql.NVarChar, `Batch: ${importBatchID}`)
-                .input('IPUtilisateur', sql.NVarChar, req.ip)
-                .input('ActionType', sql.NVarChar, 'ANNULATION_IMPORT')
-                .input('TableName', sql.NVarChar, 'Cartes')
-                .input('RecordId', sql.NVarChar, importBatchID)
-                .input('AdresseIP', sql.NVarChar, req.ip)
-                .input('UserId', sql.Int, utilisateurId)
-                .input('ImportBatchID', sql.UniqueIdentifier, importBatchID)
-                .input('DetailsAction', sql.NVarChar, `Annulation de l'importation - ${count} cartes supprimées`)
-                .query(`
-                    INSERT INTO dbo.JournalActivite (
-                        UtilisateurID, NomUtilisateur, NomComplet, Role, Agence,
-                        DateAction, Action, TableAffectee, LigneAffectee, IPUtilisateur,
-                        ActionType, TableName, RecordId, AdresseIP, UserId, ImportBatchID, DetailsAction
-                    ) VALUES (
-                        @UtilisateurID, @NomUtilisateur, @NomComplet, @Role, @Agence,
-                        @DateAction, @Action, @TableAffectee, @LigneAffectee, @IPUtilisateur,
-                        @ActionType, @TableName, @RecordId, @AdresseIP, @UserId, @ImportBatchID, @DetailsAction
-                    )
-                `);
+            await client.query(`
+                INSERT INTO journalactivite (
+                    utilisateurid, nomutilisateur, nomcomplet, role, agence,
+                    dateaction, action, tableaffectee, ligneaffectee, iputilisateur,
+                    actiontype, tablename, recordid, adresseip, userid, importbatchid, detailsaction
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            `, [
+                utilisateurId, nomUtilisateur, nomComplet, role, agence,
+                new Date(), `Annulation importation batch ${importBatchID}`, 'Cartes', 
+                `Batch: ${importBatchID}`, req.ip,
+                'ANNULATION_IMPORT', 'Cartes', importBatchID, req.ip, utilisateurId, 
+                importBatchID, `Annulation de l'importation - ${count} cartes supprimées`
+            ]);
 
             // 3. Supprimer les cartes de ce batch
-            const deleteRequest = new sql.Request(transaction);
-            deleteRequest.input('importBatchID', sql.UniqueIdentifier, importBatchID);
-            const deleteResult = await deleteRequest.query(`
-                DELETE FROM dbo.Cartes WHERE ImportBatchID = @importBatchID
-            `);
+            const deleteResult = await client.query(`
+                DELETE FROM cartes WHERE importbatchid = $1 RETURNING *
+            `, [importBatchID]);
 
-            await transaction.commit();
+            await client.query('COMMIT');
 
             res.json({
                 success: true,
-                message: `Importation annulée avec succès - ${deleteResult.rowsAffected[0]} cartes supprimées`,
-                count: deleteResult.rowsAffected[0]
+                message: `Importation annulée avec succès - ${deleteResult.rows.length} cartes supprimées`,
+                count: deleteResult.rows.length
             });
 
         } catch (error) {
-            await transaction.rollback();
+            await client.query('ROLLBACK');
             console.error('Erreur annulation import:', error);
             res.status(500).json({ error: 'Erreur lors de l\'annulation de l\'importation' });
+        } finally {
+            client.release();
         }
     }
 
     // Récupérer les imports groupés pour l'annulation
     async getImports(req, res) {
         try {
-            const pool = await poolPromise;
-            const result = await pool.request().query(`
+            const result = await db.query(`
                 SELECT 
-                    j.ImportBatchID,
-                    COUNT(c.ID) as nombreCartes,
-                    MIN(j.DateAction) as dateImport,
-                    j.NomUtilisateur,
-                    j.NomComplet,
-                    j.Agence
-                FROM dbo.JournalActivite j
-                LEFT JOIN dbo.Cartes c ON j.ImportBatchID = c.ImportBatchID
-                WHERE j.ActionType = 'IMPORT_CARTE' 
-                AND j.ImportBatchID IS NOT NULL
-                GROUP BY j.ImportBatchID, j.NomUtilisateur, j.NomComplet, j.Agence
-                ORDER BY dateImport DESC
+                    j.importbatchid,
+                    COUNT(c.id) as nombrecartes,
+                    MIN(j.dateaction) as dateimport,
+                    j.nomutilisateur,
+                    j.nomcomplet,
+                    j.agence
+                FROM journalactivite j
+                LEFT JOIN cartes c ON j.importbatchid = c.importbatchid
+                WHERE j.actiontype = 'IMPORT_CARTE' 
+                AND j.importbatchid IS NOT NULL
+                GROUP BY j.importbatchid, j.nomutilisateur, j.nomcomplet, j.agence
+                ORDER BY dateimport DESC
             `);
 
-            res.json(result.recordset);
+            res.json(result.rows);
         } catch (error) {
             console.error('Erreur récupération imports:', error);
             res.status(500).json({ error: 'Erreur lors de la récupération des imports' });
@@ -236,48 +236,56 @@ class JournalController {
     async undoAction(req, res) {
         const { id } = req.params;
         const user = req.user;
+        const client = await db.getClient();
 
         try {
-            const pool = await poolPromise;
-
+            await client.query('BEGIN');
+            
             console.log(`🔄 Tentative d'annulation (JournalID: ${id})`);
 
             // 🔍 1. On récupère le log correspondant
-            const result = await pool.request()
-                .input('JournalID', sql.Int, id)
-                .query('SELECT * FROM dbo.JournalActivite WHERE JournalID = @JournalID');
+            const result = await client.query(
+                'SELECT * FROM journalactivite WHERE journalid = $1',
+                [id]
+            );
 
-            if (result.recordset.length === 0) {
+            if (result.rows.length === 0) {
+                await client.query('ROLLBACK');
                 return res.status(404).json({ message: 'Entrée de journal non trouvée.' });
             }
 
-            const log = result.recordset[0];
-            const oldData = log.OldValue ? JSON.parse(log.OldValue) : null;
-            const newData = log.NewValue ? JSON.parse(log.NewValue) : null;
-            const tableName = log.TableName || log.TableAffectee;
-            const recordId = log.RecordId || log.LigneAffectee;
+            const log = result.rows[0];
+            const oldData = log.oldvalue ? JSON.parse(log.oldvalue) : null;
+            const newData = log.newvalue ? JSON.parse(log.newvalue) : null;
+            const tableName = log.tablename || log.tableaffectee;
+            const recordId = log.recordid || log.ligneaffectee;
 
             if (!oldData && !newData) {
+                await client.query('ROLLBACK');
                 return res.status(400).json({ message: 'Aucune donnée à restaurer.' });
             }
 
-            console.log(`🕓 Action: ${log.ActionType}, Table: ${tableName}, ID: ${recordId}`);
+            console.log(`🕓 Action: ${log.actiontype}, Table: ${tableName}, ID: ${recordId}`);
 
             // 🔄 2. Exécuter l'annulation selon le type d'action
-            if (log.ActionType === 'MODIFICATION_CARTE') {
-                await this.executeManualUpdate(pool, tableName, recordId, oldData);
-            } else if (log.ActionType === 'CREATION_CARTE') {
-                await pool.request()
-                    .input('ID', sql.Int, recordId)
-                    .query(`DELETE FROM [${tableName}] WHERE ID = @ID`);
-            } else if (log.ActionType === 'SUPPRESSION_CARTE') {
-                await this.executeManualInsert(pool, tableName, oldData);
+            if (log.actiontype === 'MODIFICATION_CARTE') {
+                await this.executeManualUpdate(client, tableName, recordId, oldData);
+            } else if (log.actiontype === 'CREATION_CARTE') {
+                await client.query(
+                    `DELETE FROM ${tableName} WHERE id = $1`,
+                    [recordId]
+                );
+            } else if (log.actiontype === 'SUPPRESSION_CARTE') {
+                await this.executeManualInsert(client, tableName, oldData);
             } else {
-                return res.status(400).json({ message: `Type d'action non supporté: ${log.ActionType}` });
+                await client.query('ROLLBACK');
+                return res.status(400).json({ message: `Type d'action non supporté: ${log.actiontype}` });
             }
 
             // 🧾 3. Journaliser cette restauration
-            await this.logUndoAction(pool, user, req, log, newData, oldData);
+            await this.logUndoAction(client, user, req, log, newData, oldData);
+
+            await client.query('COMMIT');
 
             console.log('✅ Action annulée avec succès');
             return res.json({ 
@@ -286,48 +294,43 @@ class JournalController {
             });
 
         } catch (err) {
+            await client.query('ROLLBACK');
             console.error('❌ Erreur annulation:', err);
             return res.status(500).json({ 
                 success: false,
                 message: 'Erreur serveur pendant l\'annulation.',
                 details: err.message 
             });
+        } finally {
+            client.release();
         }
     }
 
     // ✅ MÉTHODE CORRIGÉE POUR UPDATE - Exclut les colonnes non modifiables
-    async executeManualUpdate(pool, tableName, recordId, oldData) {
+    async executeManualUpdate(client, tableName, recordId, oldData) {
         let setClauses = [];
-        const request = pool.request().input('ID', sql.Int, recordId);
+        const params = [recordId];
+        let paramCount = 1;
         
-        Object.entries(oldData).forEach(([key, value], index) => {
+        Object.entries(oldData).forEach(([key, value]) => {
             // ✅ EXCLURE les colonnes non modifiables
-            if (key === 'ID' || key === 'HashDoublon') {
+            if (key === 'ID' || key === 'HashDoublon' || key === 'id') {
                 console.log(`⚠️ Colonne exclue: ${key} (non modifiable)`);
                 return; // Skip cette colonne
             }
             
-            const paramName = `param${index}`;
-            setClauses.push(`[${key}] = @${paramName}`);
+            paramCount++;
+            setClauses.push(`"${key}" = $${paramCount}`);
             
-            // ✅ GESTION CORRECTE DES TYPES (sans HashDoublon et ID)
+            // ✅ GESTION CORRECTE DES TYPES
             if (value === null) {
-                request.input(paramName, sql.NVarChar, null);
-            } else if (key === 'ImportBatchID') {
-                // GUID
-                request.input(paramName, sql.UniqueIdentifier, value);
-            } else if (key.includes('DATE') || key === 'DateImport') {
-                // Dates
-                request.input(paramName, sql.DateTime, value ? new Date(value) : null);
-            } else if (key === 'CONTACT' || key === 'CONTACT DE RETRAIT') {
-                // Contacts (nvarchar(20))
-                request.input(paramName, sql.NVarChar(20), value);
-            } else if (key === 'RANGEMENT') {
-                // Rangement (nvarchar(100))
-                request.input(paramName, sql.NVarChar(100), value);
+                params.push(null);
+            } else if (key === 'ImportBatchID' || key === 'importbatchid') {
+                params.push(value);
+            } else if (key.includes('DATE') || key.includes('date') || key === 'DateImport' || key === 'dateimport') {
+                params.push(value ? new Date(value) : null);
             } else {
-                // Texte par défaut (nvarchar(255))
-                request.input(paramName, sql.NVarChar(255), value);
+                params.push(value);
             }
         });
 
@@ -336,125 +339,86 @@ class JournalController {
             throw new Error('Aucune colonne modifiable à mettre à jour');
         }
 
-        const updateQuery = `UPDATE [${tableName}] SET ${setClauses.join(', ')} WHERE ID = @ID`;
+        const updateQuery = `UPDATE ${tableName} SET ${setClauses.join(', ')} WHERE id = $1`;
         console.log('🔧 Requête UPDATE corrigée:', updateQuery);
-        await request.query(updateQuery);
+        await client.query(updateQuery, params);
     }
 
     // ✅ MÉTHODE CORRIGÉE POUR INSERT - Exclut ID pour les nouvelles insertions
-    async executeManualInsert(pool, tableName, oldData) {
+    async executeManualInsert(client, tableName, oldData) {
         // Filtrer les colonnes - exclure ID pour l'insertion
         const filteredData = { ...oldData };
-        delete filteredData.ID; // ✅ ID est auto-généré
+        delete filteredData.ID;
+        delete filteredData.id;
         
-        const columns = Object.keys(filteredData).map(k => `[${k}]`).join(', ');
-        const params = Object.keys(filteredData).map((k, index) => `@param${index}`).join(', ');
+        const columns = Object.keys(filteredData).map(k => `"${k}"`).join(', ');
+        const placeholders = Object.keys(filteredData).map((_, index) => `$${index + 1}`).join(', ');
 
-        const request = pool.request();
-        Object.entries(filteredData).forEach(([key, value], index) => {
-            const paramName = `param${index}`;
-            
-            // ✅ GESTION CORRECTE DES TYPES
-            if (value === null) {
-                request.input(paramName, sql.NVarChar, null);
-            } else if (key === 'HashDoublon') {
-                // ✅ CORRECTION : HashDoublon est varbinary (Buffer Node.js)
-                if (value && value.type === 'Buffer' && value.data) {
-                    const buffer = Buffer.from(value.data);
-                    request.input(paramName, sql.VarBinary, buffer);
-                } else {
-                    request.input(paramName, sql.VarBinary, null);
-                }
-            } else if (key === 'ImportBatchID') {
-                request.input(paramName, sql.UniqueIdentifier, value);
-            } else if (key.includes('DATE') || key === 'DateImport') {
-                request.input(paramName, sql.DateTime, value ? new Date(value) : null);
-            } else if (key === 'CONTACT' || key === 'CONTACT DE RETRAIT') {
-                request.input(paramName, sql.NVarChar(20), value);
-            } else if (key === 'RANGEMENT') {
-                request.input(paramName, sql.NVarChar(100), value);
-            } else {
-                request.input(paramName, sql.NVarChar(255), value);
+        const params = Object.values(filteredData).map(value => {
+            if (value === null) return null;
+            // Gestion des dates
+            if (typeof value === 'string' && value.match(/^\d{4}-\d{2}-\d{2}/)) {
+                return new Date(value);
             }
+            return value;
         });
 
-        const insertQuery = `INSERT INTO [${tableName}] (${columns}) VALUES (${params})`;
+        const insertQuery = `INSERT INTO ${tableName} (${columns}) VALUES (${placeholders})`;
         console.log('🔧 Requête INSERT corrigée:', insertQuery);
-        await request.query(insertQuery);
+        await client.query(insertQuery, params);
     }
 
     // ✅ MÉTHODE POUR JOURNALISER L'ANNULATION
-    async logUndoAction(pool, user, req, log, newData, oldData) {
-        const tableName = log.TableName || log.TableAffectee;
-        const recordId = log.RecordId || log.LigneAffectee;
+    async logUndoAction(client, user, req, log, newData, oldData) {
+        const tableName = log.tablename || log.tableaffectee;
+        const recordId = log.recordid || log.ligneaffectee;
 
-        await pool.request()
-            .input('UtilisateurID', sql.Int, user.id)
-            .input('NomUtilisateur', sql.NVarChar, user.NomUtilisateur)
-            .input('NomComplet', sql.NVarChar, user.NomComplet || user.NomUtilisateur)
-            .input('Role', sql.NVarChar, user.Role)
-            .input('Agence', sql.NVarChar, user.Agence || '')
-            .input('DateAction', sql.DateTime, new Date())
-            .input('Action', sql.NVarChar, `Annulation de ${log.ActionType}`)
-            .input('TableAffectee', sql.NVarChar, tableName)
-            .input('LigneAffectee', sql.NVarChar, recordId.toString())
-            .input('IPUtilisateur', sql.NVarChar, req.ip || '')
-            .input('ActionType', sql.NVarChar, 'ANNULATION')
-            .input('TableName', sql.NVarChar, tableName)
-            .input('RecordId', sql.NVarChar, recordId.toString())
-            .input('OldValue', sql.NVarChar(sql.MAX), JSON.stringify(newData))
-            .input('NewValue', sql.NVarChar(sql.MAX), JSON.stringify(oldData))
-            .input('AdresseIP', sql.NVarChar, req.ip || '')
-            .input('UserId', sql.Int, user.id)
-            .input('DetailsAction', sql.NVarChar, `Annulation de: ${log.ActionType}`)
-            .query(`
-                INSERT INTO dbo.JournalActivite 
-                (UtilisateurID, NomUtilisateur, NomComplet, Role, Agence, DateAction, Action, 
-                 TableAffectee, LigneAffectee, IPUtilisateur, ActionType, TableName, RecordId, 
-                 OldValue, NewValue, AdresseIP, UserId, DetailsAction)
-                VALUES (@UtilisateurID, @NomUtilisateur, @NomComplet, @Role, @Agence, @DateAction, @Action, 
-                        @TableAffectee, @LigneAffectee, @IPUtilisateur, @ActionType, @TableName, @RecordId, 
-                        @OldValue, @NewValue, @AdresseIP, @UserId, @DetailsAction)
-            `);
+        await client.query(`
+            INSERT INTO journalactivite 
+            (utilisateurid, nomutilisateur, nomcomplet, role, agence, dateaction, action, 
+             tableaffectee, ligneaffectee, iputilisateur, actiontype, tablename, recordid, 
+             oldvalue, newvalue, adresseip, userid, detailsaction)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        `, [
+            user.id, user.NomUtilisateur, user.NomComplet || user.NomUtilisateur, user.Role, 
+            user.Agence || '', new Date(), `Annulation de ${log.actiontype}`,
+            tableName, recordId.toString(), req.ip || '', 'ANNULATION', tableName, 
+            recordId.toString(), JSON.stringify(newData), JSON.stringify(oldData), 
+            req.ip || '', user.id, `Annulation de: ${log.actiontype}`
+        ]);
     }
 
     // Méthode utilitaire pour journaliser les actions (à utiliser dans autres contrôleurs)
     async logAction(logData) {
         try {
-            const pool = await poolPromise;
-            await pool.request()
-                .input('UtilisateurID', sql.Int, logData.utilisateurId || null)
-                .input('NomUtilisateur', sql.NVarChar, logData.nomUtilisateur || 'System')
-                .input('NomComplet', sql.NVarChar, logData.nomComplet || 'System')
-                .input('Role', sql.NVarChar, logData.role || 'System')
-                .input('Agence', sql.NVarChar, logData.agence || null)
-                .input('DateAction', sql.DateTime, new Date())
-                .input('Action', sql.NVarChar, logData.action || logData.actionType)
-                .input('TableAffectee', sql.NVarChar, logData.tableName || null)
-                .input('LigneAffectee', sql.NVarChar, logData.recordId || null)
-                .input('IPUtilisateur', sql.NVarChar, logData.ip || null)
-                .input('ActionType', sql.NVarChar, logData.actionType)
-                .input('TableName', sql.NVarChar, logData.tableName || null)
-                .input('RecordId', sql.NVarChar, logData.recordId || null)
-                .input('OldValue', sql.NVarChar, logData.oldValue || null)
-                .input('NewValue', sql.NVarChar, logData.newValue || null)
-                .input('AdresseIP', sql.NVarChar, logData.ip || null)
-                .input('UserId', sql.Int, logData.utilisateurId || null)
-                .input('ImportBatchID', sql.UniqueIdentifier, logData.importBatchID || null)
-                .input('DetailsAction', sql.NVarChar, logData.details || null)
-                .query(`
-                    INSERT INTO dbo.JournalActivite (
-                        UtilisateurID, NomUtilisateur, NomComplet, Role, Agence,
-                        DateAction, Action, TableAffectee, LigneAffectee, IPUtilisateur,
-                        ActionType, TableName, RecordId, OldValue, NewValue, AdresseIP,
-                        UserId, ImportBatchID, DetailsAction
-                    ) VALUES (
-                        @UtilisateurID, @NomUtilisateur, @NomComplet, @Role, @Agence,
-                        @DateAction, @Action, @TableAffectee, @LigneAffectee, @IPUtilisateur,
-                        @ActionType, @TableName, @RecordId, @OldValue, @NewValue, @AdresseIP,
-                        @UserId, @ImportBatchID, @DetailsAction
-                    )
-                `);
+            await db.query(`
+                INSERT INTO journalactivite (
+                    utilisateurid, nomutilisateur, nomcomplet, role, agence,
+                    dateaction, action, tableaffectee, ligneaffectee, iputilisateur,
+                    actiontype, tablename, recordid, oldvalue, newvalue, adresseip,
+                    userid, importbatchid, detailsaction
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            `, [
+                logData.utilisateurId || null,
+                logData.nomUtilisateur || 'System',
+                logData.nomComplet || 'System', 
+                logData.role || 'System',
+                logData.agence || null,
+                new Date(),
+                logData.action || logData.actionType,
+                logData.tableName || null,
+                logData.recordId || null,
+                logData.ip || null,
+                logData.actionType,
+                logData.tableName || null,
+                logData.recordId || null,
+                logData.oldValue || null,
+                logData.newValue || null,
+                logData.ip || null,
+                logData.utilisateurId || null,
+                logData.importBatchID || null,
+                logData.details || null
+            ]);
         } catch (error) {
             console.error('Erreur journalisation:', error);
         }
@@ -463,21 +427,52 @@ class JournalController {
     // Statistiques d'activité
     async getStats(req, res) {
         try {
-            const pool = await poolPromise;
-            const result = await pool.request().query(`
+            const result = await db.query(`
                 SELECT 
-                    ActionType,
+                    actiontype,
                     COUNT(*) as count,
-                    MAX(DateAction) as derniereAction
-                FROM dbo.JournalActivite 
-                WHERE DateAction >= DATEADD(day, -30, GETDATE())
-                GROUP BY ActionType
+                    MAX(dateaction) as derniereaction
+                FROM journalactivite 
+                WHERE dateaction >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY actiontype
                 ORDER BY count DESC
             `);
-            res.json(result.recordset);
+            res.json(result.rows);
         } catch (error) {
             console.error('Erreur stats:', error);
             res.status(500).json({ error: 'Erreur lors de la récupération des statistiques' });
+        }
+    }
+
+    // Nettoyer le journal (supprimer les vieilles entrées)
+    async nettoyerJournal(req, res) {
+        const client = await db.getClient();
+        
+        try {
+            await client.query('BEGIN');
+            
+            const { jours = 90 } = req.body;
+            
+            const result = await client.query(`
+                DELETE FROM journalactivite 
+                WHERE dateaction < CURRENT_DATE - INTERVAL '${jours} days'
+                RETURNING *
+            `);
+            
+            await client.query('COMMIT');
+            
+            res.json({
+                success: true,
+                message: `Journal nettoyé avec succès - ${result.rows.length} entrées supprimées`,
+                deletedCount: result.rows.length
+            });
+            
+        } catch (error) {
+            await client.query('ROLLBACK');
+            console.error('Erreur nettoyage journal:', error);
+            res.status(500).json({ error: 'Erreur lors du nettoyage du journal' });
+        } finally {
+            client.release();
         }
     }
 }

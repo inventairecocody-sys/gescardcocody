@@ -1,4 +1,4 @@
-const { poolPromise, sql } = require('../db/db');
+const db = require('../db/db');
 const journalController = require('./journalController');
 
 // 🔧 CONFIGURATION API EXTERNE
@@ -26,24 +26,24 @@ exports.getCartes = async (req, res) => {
     // Valider et limiter les paramètres
     const actualLimit = Math.min(parseInt(limit), API_CONFIG.maxResults);
     const actualPage = Math.max(1, parseInt(page));
+    const offset = (actualPage - 1) * actualLimit;
 
-    const pool = await poolPromise;
     let query = `
       SELECT 
-        ID,
-        [LIEU D'ENROLEMENT],
-        [SITE DE RETRAIT],
-        RANGEMENT,
-        NOM,
-        PRENOMS,
-        [DATE DE NAISSANCE],
-        [LIEU NAISSANCE],
-        CONTACT,
-        DELIVRANCE,
-        [CONTACT DE RETRAIT],
-        [DATE DE DELIVRANCE],
-        DateImport
-      FROM Cartes 
+        id,
+        "LIEU D'ENROLEMENT",
+        "SITE DE RETRAIT",
+        rangement,
+        nom,
+        prenoms,
+        "DATE DE NAISSANCE",
+        "LIEU NAISSANCE",
+        contact,
+        delivrance,
+        "CONTACT DE RETRAIT",
+        "DATE DE DELIVRANCE",
+        dateimport
+      FROM cartes 
       WHERE 1=1
     `;
 
@@ -53,66 +53,89 @@ exports.getCartes = async (req, res) => {
     // Appliquer les filtres
     if (nom) {
       paramCount++;
-      query += ` AND NOM LIKE @nom${paramCount}`;
-      params.push({ name: `nom${paramCount}`, value: `%${nom}%` });
+      query += ` AND nom ILIKE $${paramCount}`;
+      params.push(`%${nom}%`);
     }
 
     if (prenom) {
       paramCount++;
-      query += ` AND PRENOMS LIKE @prenom${paramCount}`;
-      params.push({ name: `prenom${paramCount}`, value: `%${prenom}%` });
+      query += ` AND prenoms ILIKE $${paramCount}`;
+      params.push(`%${prenom}%`);
     }
 
     if (contact) {
       paramCount++;
-      query += ` AND CONTACT LIKE @contact${paramCount}`;
-      params.push({ name: `contact${paramCount}`, value: `%${contact}%` });
+      query += ` AND contact ILIKE $${paramCount}`;
+      params.push(`%${contact}%`);
     }
 
     if (siteRetrait) {
       paramCount++;
-      query += ` AND [SITE DE RETRAIT] LIKE @siteRetrait${paramCount}`;
-      params.push({ name: `siteRetrait${paramCount}`, value: `%${siteRetrait}%` });
+      query += ` AND "SITE DE RETRAIT" ILIKE $${paramCount}`;
+      params.push(`%${siteRetrait}%`);
     }
 
     if (dateDebut) {
       paramCount++;
-      query += ` AND DateImport >= @dateDebut${paramCount}`;
-      params.push({ name: `dateDebut${paramCount}`, value: new Date(dateDebut) });
+      query += ` AND dateimport >= $${paramCount}`;
+      params.push(new Date(dateDebut));
     }
 
     if (dateFin) {
       paramCount++;
-      query += ` AND DateImport <= @dateFin${paramCount}`;
-      params.push({ name: `dateFin${paramCount}`, value: new Date(dateFin + ' 23:59:59') });
+      query += ` AND dateimport <= $${paramCount}`;
+      params.push(new Date(dateFin + ' 23:59:59'));
     }
 
-    // Pagination
-    const offset = (actualPage - 1) * actualLimit;
-    query += ` ORDER BY ID DESC OFFSET ${offset} ROWS FETCH NEXT ${actualLimit} ROWS ONLY`;
+    // Pagination (PostgreSQL)
+    query += ` ORDER BY id DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(actualLimit, offset);
 
-    const request = pool.request();
-    params.forEach(param => {
-      request.input(param.name, param.value);
-    });
+    const result = await db.query(query, params);
 
-    const result = await request.query(query);
+    // Compter le total (sans pagination)
+    let countQuery = 'SELECT COUNT(*) as total FROM cartes WHERE 1=1';
+    const countParams = [];
 
-    // Compter le total
-    let countQuery = 'SELECT COUNT(*) as total FROM Cartes WHERE 1=1';
-    const countParams = params;
+    // Reconstruction des paramètres pour le COUNT
+    let countParamCount = 0;
+    if (nom) {
+      countParamCount++;
+      countQuery += ` AND nom ILIKE $${countParamCount}`;
+      countParams.push(`%${nom}%`);
+    }
+    if (prenom) {
+      countParamCount++;
+      countQuery += ` AND prenoms ILIKE $${countParamCount}`;
+      countParams.push(`%${prenom}%`);
+    }
+    if (contact) {
+      countParamCount++;
+      countQuery += ` AND contact ILIKE $${countParamCount}`;
+      countParams.push(`%${contact}%`);
+    }
+    if (siteRetrait) {
+      countParamCount++;
+      countQuery += ` AND "SITE DE RETRAIT" ILIKE $${countParamCount}`;
+      countParams.push(`%${siteRetrait}%`);
+    }
+    if (dateDebut) {
+      countParamCount++;
+      countQuery += ` AND dateimport >= $${countParamCount}`;
+      countParams.push(new Date(dateDebut));
+    }
+    if (dateFin) {
+      countParamCount++;
+      countQuery += ` AND dateimport <= $${countParamCount}`;
+      countParams.push(new Date(dateFin + ' 23:59:59'));
+    }
 
-    const countRequest = pool.request();
-    countParams.forEach(param => {
-      countRequest.input(param.name, param.value);
-    });
-
-    const countResult = await countRequest.query(countQuery);
-    const total = countResult.recordset[0].total;
+    const countResult = await db.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
 
     res.json({
       success: true,
-      data: result.recordset,
+      data: result.rows,
       pagination: {
         page: actualPage,
         limit: actualLimit,
@@ -134,15 +157,15 @@ exports.getCartes = async (req, res) => {
 
 // 🔹 SYNCHRONISER DES DONNÉES (votre collègue envoie ses données)
 exports.syncData = async (req, res) => {
-  const transaction = new sql.Transaction(await poolPromise);
+  const client = await db.getClient();
   
   try {
-    await transaction.begin();
+    await client.query('BEGIN');
     
     const { donnees, source = 'python_app' } = req.body;
     
     if (!donnees || !Array.isArray(donnees)) {
-      await transaction.rollback();
+      await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
         error: 'Format invalide: données doit être un tableau'
@@ -151,7 +174,7 @@ exports.syncData = async (req, res) => {
 
     // Limiter le nombre d'enregistrements par requête
     if (donnees.length > 1000) {
-      await transaction.rollback();
+      await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
         error: 'Trop d\'enregistrements. Maximum 1000 par requête.'
@@ -177,49 +200,38 @@ exports.syncData = async (req, res) => {
           continue;
         }
 
-        // Vérifier les doublons
-        const duplicateCheck = await transaction.request()
-          .input('nom', sql.NVarChar(255), item.NOM)
-          .input('prenoms', sql.NVarChar(255), item.PRENOMS)
-          .query('SELECT COUNT(*) as count FROM Cartes WHERE NOM = @nom AND PRENOMS = @prenoms');
+        // Vérifier les doublons (PostgreSQL)
+        const duplicateCheck = await client.query(
+          'SELECT COUNT(*) as count FROM cartes WHERE nom = $1 AND prenoms = $2',
+          [item.NOM, item.PRENOMS]
+        );
 
-        if (duplicateCheck.recordset[0].count > 0) {
+        if (parseInt(duplicateCheck.rows[0].count) > 0) {
           duplicates++;
           continue;
         }
 
-        // Insérer la donnée
-        const request = transaction.request();
-        const sqlParams = {
-          'LIEU_D_ENROLEMENT': [sql.NVarChar(255), item["LIEU D'ENROLEMENT"] || ''],
-          'SITE_DE_RETRAIT': [sql.NVarChar(255), item["SITE DE RETRAIT"] || ''],
-          'RANGEMENT': [sql.NVarChar(100), item.RANGEMENT || ''],
-          'NOM': [sql.NVarChar(255), item.NOM || ''],
-          'PRENOMS': [sql.NVarChar(255), item.PRENOMS || ''],
-          'DATE_DE_NAISSANCE': [sql.Date, item["DATE DE NAISSANCE"] ? new Date(item["DATE DE NAISSANCE"]) : null],
-          'LIEU_NAISSANCE': [sql.NVarChar(255), item["LIEU NAISSANCE"] || ''],
-          'CONTACT': [sql.NVarChar(20), item.CONTACT || ''],
-          'DELIVRANCE': [sql.NVarChar(255), item.DELIVRANCE || ''],
-          'CONTACT_DE_RETRAIT': [sql.NVarChar(255), item["CONTACT DE RETRAIT"] || ''],
-          'DATE_DE_DELIVRANCE': [sql.Date, item["DATE DE DELIVRANCE"] ? new Date(item["DATE DE DELIVRANCE"]) : null],
-          'SOURCE_IMPORT': [sql.NVarChar(50), source]
-        };
-
-        Object.entries(sqlParams).forEach(([key, [type, value]]) => {
-          request.input(key, type, value);
-        });
-
-        await request.query(`
-          INSERT INTO Cartes (
-            [LIEU D'ENROLEMENT], [SITE DE RETRAIT], RANGEMENT, NOM, PRENOMS,
-            [DATE DE NAISSANCE], [LIEU NAISSANCE], CONTACT, DELIVRANCE,
-            [CONTACT DE RETRAIT], [DATE DE DELIVRANCE], SourceImport
-          ) VALUES (
-            @LIEU_D_ENROLEMENT, @SITE_DE_RETRAIT, @RANGEMENT, @NOM, @PRENOMS,
-            @DATE_DE_NAISSANCE, @LIEU_NAISSANCE, @CONTACT, @DELIVRANCE,
-            @CONTACT_DE_RETRAIT, @DATE_DE_DELIVRANCE, @SOURCE_IMPORT
-          )
-        `);
+        // Insérer la donnée (PostgreSQL)
+        await client.query(`
+          INSERT INTO cartes (
+            "LIEU D'ENROLEMENT", "SITE DE RETRAIT", rangement, nom, prenoms,
+            "DATE DE NAISSANCE", "LIEU NAISSANCE", contact, delivrance,
+            "CONTACT DE RETRAIT", "DATE DE DELIVRANCE", sourceimport
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `, [
+          item["LIEU D'ENROLEMENT"] || '',
+          item["SITE DE RETRAIT"] || '',
+          item.RANGEMENT || '',
+          item.NOM || '',
+          item.PRENOMS || '',
+          item["DATE DE NAISSANCE"] ? new Date(item["DATE DE NAISSANCE"]) : null,
+          item["LIEU NAISSANCE"] || '',
+          item.CONTACT || '',
+          item.DELIVRANCE || '',
+          item["CONTACT DE RETRAIT"] || '',
+          item["DATE DE DELIVRANCE"] ? new Date(item["DATE DE DELIVRANCE"]) : null,
+          source
+        ]);
 
         imported++;
 
@@ -229,18 +241,22 @@ exports.syncData = async (req, res) => {
       }
     }
 
-    await transaction.commit();
+    await client.query('COMMIT');
 
     // Journaliser la synchronisation
-    await journalController.logAction({
-      nomUtilisateur: 'API_EXTERNE',
-      nomComplet: 'Application Python Collègue',
-      role: 'API_CLIENT',
-      agence: 'EXTERNE',
-      actionType: 'SYNC_API',
-      tableName: 'Cartes',
-      details: `Synchronisation API - ${imported} importés, ${duplicates} doublons, ${errors} erreurs - Source: ${source}`
-    });
+    try {
+      await journalController.logAction({
+        nomUtilisateur: 'API_EXTERNE',
+        nomComplet: 'Application Python Collègue',
+        role: 'API_CLIENT',
+        agence: 'EXTERNE',
+        actionType: 'SYNC_API',
+        tableName: 'Cartes',
+        details: `Synchronisation API - ${imported} importés, ${duplicates} doublons, ${errors} erreurs - Source: ${source}`
+      });
+    } catch (journalError) {
+      console.warn('⚠️ Impossible de journaliser:', journalError.message);
+    }
 
     res.json({
       success: true,
@@ -255,46 +271,46 @@ exports.syncData = async (req, res) => {
     });
 
   } catch (error) {
-    await transaction.rollback();
+    await client.query('ROLLBACK');
     console.error('❌ Erreur API syncData:', error);
     res.status(500).json({
       success: false,
       error: 'Erreur lors de la synchronisation',
       details: error.message
     });
+  } finally {
+    client.release();
   }
 };
 
 // 🔹 STATISTIQUES POUR L'API
 exports.getStats = async (req, res) => {
   try {
-    const pool = await poolPromise;
-
-    const stats = await pool.request().query(`
+    const stats = await db.query(`
       SELECT 
-        COUNT(*) as totalCartes,
-        COUNT(CASE WHEN DELIVRANCE IS NOT NULL AND DELIVRANCE != '' THEN 1 END) as cartesRetirees,
-        COUNT(DISTINCT [SITE DE RETRAIT]) as sitesDistincts,
-        MIN(DateImport) as datePremierImport,
-        MAX(DateImport) as dateDernierImport
-      FROM Cartes
+        COUNT(*) as totalcartes,
+        COUNT(CASE WHEN delivrance IS NOT NULL AND delivrance != '' THEN 1 END) as cartesretirees,
+        COUNT(DISTINCT "SITE DE RETRAIT") as sitesdistincts,
+        MIN(dateimport) as datepremierimport,
+        MAX(dateimport) as datedernierimport
+      FROM cartes
     `);
 
-    const sitesStats = await pool.request().query(`
+    const sitesStats = await db.query(`
       SELECT 
-        [SITE DE RETRAIT] as site,
+        "SITE DE RETRAIT" as site,
         COUNT(*) as total,
-        COUNT(CASE WHEN DELIVRANCE IS NOT NULL AND DELIVRANCE != '' THEN 1 END) as retires
-      FROM Cartes 
-      WHERE [SITE DE RETRAIT] IS NOT NULL 
-      GROUP BY [SITE DE RETRAIT]
+        COUNT(CASE WHEN delivrance IS NOT NULL AND delivrance != '' THEN 1 END) as retires
+      FROM cartes 
+      WHERE "SITE DE RETRAIT" IS NOT NULL 
+      GROUP BY "SITE DE RETRAIT"
       ORDER BY total DESC
     `);
 
     res.json({
       success: true,
-      stats: stats.recordset[0],
-      sites: sitesStats.recordset,
+      stats: stats.rows[0],
+      sites: sitesStats.rows,
       timestamp: new Date().toISOString()
     });
 
@@ -311,19 +327,17 @@ exports.getStats = async (req, res) => {
 // 🔹 VÉRIFICATION DE SANTÉ DE L'API
 exports.healthCheck = async (req, res) => {
   try {
-    const pool = await poolPromise;
-    
     // Tester la connexion à la base de données
-    await pool.request().query('SELECT 1 as test');
+    await db.query('SELECT 1 as test');
     
     // Récupérer quelques métriques
-    const countResult = await pool.request().query('SELECT COUNT(*) as total FROM Cartes');
+    const countResult = await db.query('SELECT COUNT(*) as total FROM cartes');
     
     res.json({
       success: true,
       status: 'healthy',
       database: 'connected',
-      totalRecords: countResult.recordset[0].total,
+      totalRecords: parseInt(countResult.rows[0].total),
       timestamp: new Date().toISOString(),
       version: '1.0.0'
     });
@@ -337,3 +351,6 @@ exports.healthCheck = async (req, res) => {
     });
   }
 };
+
+// 🔹 EXPORT POUR LES TESTS (optionnel)
+exports.API_CONFIG = API_CONFIG;
