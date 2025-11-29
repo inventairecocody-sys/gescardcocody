@@ -20,19 +20,63 @@ const externalApiRoutes = require("./routes/externalApi");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS pour production et développement
-app.use(cors({ 
-  origin: process.env.NODE_ENV === 'production' 
-    ? ["https://votre-frontend.vercel.app", "http://localhost:5173"]
-    : "http://localhost:5173",
-  credentials: true
-}));
+// 🔥 CORS CORRIGÉ - Configuration complète
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Domaines autorisés
+    const allowedOrigins = [
+      'https://gescardcocody.netlify.app', // ✅ VOTRE DOMAINE NETLIFY
+      'https://votre-frontend.vercel.app', 
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'https://gescardcocody-frontend.netlify.app' // Au cas où
+    ];
+    
+    // En développement, autoriser toutes les origines
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`🔧 CORS Development - Origin: ${origin}`);
+      return callback(null, true);
+    }
+    
+    // En production, vérifier l'origine
+    if (allowedOrigins.includes(origin)) {
+      console.log(`✅ CORS autorisé pour: ${origin}`);
+      callback(null, true);
+    } else {
+      console.warn(`🚫 CORS bloqué pour: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
+  ],
+  exposedHeaders: [
+    'Content-Range',
+    'X-Content-Range'
+  ],
+  maxAge: 86400, // Cache preflight pendant 24 heures
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+
+// Gestion explicite des pré-vols OPTIONS
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Log des requêtes
+// Log des requêtes avec origine
 app.use((req, res, next) => {
-  console.log(`📨 ${req.method} ${req.url}`);
+  console.log(`📨 ${req.method} ${req.url} - Origin: ${req.headers.origin}`);
   next();
 });
 
@@ -66,6 +110,14 @@ app.get("/api", (req, res) => {
     version: "1.0.0",
     environment: process.env.NODE_ENV || 'development',
     deployment: "Render",
+    cors: {
+      allowed_origins: [
+        'https://gescardcocody.netlify.app',
+        'https://votre-frontend.vercel.app',
+        'http://localhost:5173'
+      ],
+      status: "configured"
+    },
     routes: {
       public: [
         "GET /api/test-db", 
@@ -101,6 +153,7 @@ app.get("/api", (req, res) => {
     status: {
       database: "PostgreSQL",
       api: "En ligne",
+      cors: "Actif",
       timestamp: new Date().toISOString()
     }
   });
@@ -118,7 +171,7 @@ app.use("/api/profil", profilRoutes);
 app.use("/api/statistiques", statistiquesRoutes);
 app.use("/api/external", externalApiRoutes);
 
-// Route de santé globale
+// Route de santé globale avec info CORS
 app.get("/api/health", async (req, res) => {
   try {
     // Test de la base de données
@@ -138,7 +191,15 @@ app.get("/api/health", async (req, res) => {
         status: "connected",
         server_time: dbResult.rows[0].server_time,
         database_name: dbResult.rows[0].database_name,
-        postgres_version: dbResult.rows[0].postgres_version.split(',')[0] // Version simplifiée
+        postgres_version: dbResult.rows[0].postgres_version.split(',')[0]
+      },
+      cors: {
+        status: "enabled",
+        allowed_origins: [
+          'https://gescardcocody.netlify.app',
+          'http://localhost:5173'
+        ],
+        request_origin: req.headers.origin || 'none'
       },
       statistics: {
         total_cartes: parseInt(statsResult.rows[0].total_cartes),
@@ -160,9 +221,27 @@ app.get("/api/health", async (req, res) => {
       status: "unhealthy",
       error: error.message,
       database: "PostgreSQL",
+      cors: {
+        status: "error",
+        request_origin: req.headers.origin || 'none'
+      },
       timestamp: new Date().toISOString()
     });
   }
+});
+
+// Route test CORS spécifique
+app.get("/api/cors-test", (req, res) => {
+  res.json({
+    message: "✅ Test CORS réussi",
+    your_origin: req.headers.origin || 'Non spécifié',
+    cors_status: "Actif",
+    allowed_origins: [
+      'https://gescardcocody.netlify.app',
+      'http://localhost:5173'
+    ],
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Route test racine
@@ -171,8 +250,10 @@ app.get("/", (req, res) => {
     message: "🚀 API CartesProject PostgreSQL en ligne !",
     documentation: `http://localhost:${PORT}/api`,
     health_check: `http://localhost:${PORT}/api/health`,
+    cors_test: `http://localhost:${PORT}/api/cors-test`,
     database: "PostgreSQL",
-    deployment: "Render"
+    deployment: "Render",
+    cors: "Configuré pour gescardcocody.netlify.app"
   });
 });
 
@@ -182,10 +263,12 @@ app.use((req, res) => {
     success: false,
     message: "Route non trouvée",
     requested: `${req.method} ${req.url}`,
+    origin: req.headers.origin || 'Non spécifié',
     help: "Voir /api pour les routes disponibles",
     available_routes: {
       documentation: "GET /api",
       health_check: "GET /api/health",
+      cors_test: "GET /api/cors-test",
       database_test: "GET /api/test-db"
     }
   });
@@ -194,6 +277,19 @@ app.use((req, res) => {
 // Gestion globale des erreurs
 app.use((err, req, res, next) => {
   console.error("❌ Erreur serveur:", err);
+  
+  // Erreur CORS spécifique
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({
+      success: false,
+      message: "Accès interdit par CORS",
+      error: `L'origine '${req.headers.origin}' n'est pas autorisée`,
+      allowed_origins: [
+        'https://gescardcocody.netlify.app',
+        'http://localhost:5173'
+      ]
+    });
+  }
   
   // Erreur de validation
   if (err.name === 'ValidationError') {
@@ -221,7 +317,7 @@ app.use((err, req, res, next) => {
   }
 
   // Erreur de base de données PostgreSQL
-  if (err.code && err.code.startsWith('23') || err.code === '23505') { // Violation de contrainte
+  if (err.code && err.code.startsWith('23') || err.code === '23505') {
     return res.status(400).json({
       success: false,
       message: "Erreur de données",
@@ -229,7 +325,7 @@ app.use((err, req, res, next) => {
     });
   }
 
-  if (err.code === '23503') { // Violation de clé étrangère
+  if (err.code === '23503') {
     return res.status(400).json({
       success: false,
       message: "Erreur de référence",
@@ -261,9 +357,11 @@ app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
   console.log(`📖 Documentation: http://localhost:${PORT}/api`);
   console.log(`🔧 Health Check: http://localhost:${PORT}/api/health`);
+  console.log(`🌐 CORS Test: http://localhost:${PORT}/api/cors-test`);
   console.log(`🌐 Environnement: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🗄️ Base de données: PostgreSQL`);
   console.log(`☁️  Déploiement: Render`);
+  console.log(`🔒 CORS configuré pour: https://gescardcocody.netlify.app`);
   console.log(`⏰ Démarrage: ${new Date().toLocaleString()}`);
   
   // Message spécifique pour PostgreSQL
