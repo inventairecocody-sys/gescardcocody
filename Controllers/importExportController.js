@@ -55,7 +55,7 @@ class ImportResult {
       errors: this.errors,
       totalProcessed: this.totalProcessed,
       successRate: this.totalProcessed > 0 ? Math.round((this.imported / this.totalProcessed) * 100) : 0,
-      importBatchID: importBatchID,
+      importBatchID: this.importBatchID,
       duration: `${Math.round(duration / 1000)}s`
     };
   }
@@ -199,10 +199,10 @@ class FileHelper {
   }
 }
 
-// 🎯 SERVICE PRINCIPAL - VERSION POSTGRESQL
+// 🎯 SERVICE PRINCIPAL - VERSION POSTGRESQL CORRIGÉE
 class CarteImportExportService {
   /**
-   * Import d'un fichier Excel - VERSION POSTGRESQL
+   * Import d'un fichier Excel - VERSION POSTGRESQL CORRIGÉE
    */
   static async importExcel(req, res) {
     console.time('⏱️ Import Excel');
@@ -216,7 +216,7 @@ class CarteImportExportService {
     }
 
     const importBatchID = uuidv4();
-    const client = await db.getClient();
+    const client = await db.connect(); // ✅ CORRECTION: db.connect() au lieu de db.getClient()
     
     try {
       await client.query('BEGIN');
@@ -344,7 +344,7 @@ class CarteImportExportService {
         importBatchID: importBatchID
       });
     } finally {
-      client.release();
+      client.release(); // ✅ CORRECTION: client.release() au lieu de client.close()
     }
   }
 

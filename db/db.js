@@ -1,4 +1,3 @@
-// db/db.js - VERSION POSTGRESQL RENDER
 const { Pool } = require('pg');
 const dotenv = require("dotenv");
 dotenv.config();
@@ -15,7 +14,7 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   max: 20,
   // Paramètres supplémentaires pour optimisation
-  maxUses: 7500, // Nombre max d'utilisations par client
+  maxUses: 7500,
   allowExitOnIdle: true
 });
 

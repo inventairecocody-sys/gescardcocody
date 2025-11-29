@@ -1,5 +1,3 @@
-// middleware/apiAuth.js
-
 /**
  * Middleware d'authentification pour l'API externe
  * Utilise un token API simple plutôt que JWT
