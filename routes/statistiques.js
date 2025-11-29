@@ -1,27 +1,24 @@
 const express = require("express");
 const router = express.Router();
-const { poolPromise } = require("../db/db");
+const { query } = require("../db/db");
 
 // 🔹 STATISTIQUES GLOBALES OPTIMISÉES
 router.get("/globales", async (req, res) => {
-  let pool;
   try {
     console.log("📊 Calcul des statistiques globales...");
     
-    pool = await poolPromise;
-    
-    const result = await pool.request().query(`
+    const result = await query(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE 
-          WHEN DELIVRANCE IS NOT NULL 
-          AND LTRIM(RTRIM(ISNULL(DELIVRANCE, ''))) != '' 
+          WHEN delivrance IS NOT NULL 
+          AND TRIM(COALESCE(delivrance, '')) != '' 
           THEN 1 ELSE 0 
         END) as retires
-      FROM dbo.Cartes
+      FROM cartes
     `);
 
-    const stats = result.recordset[0];
+    const stats = result.rows[0];
     const response = {
       total: parseInt(stats.total) || 0,
       retires: parseInt(stats.retires) || 0,
@@ -42,29 +39,26 @@ router.get("/globales", async (req, res) => {
 
 // 🔹 STATISTIQUES PAR SITE OPTIMISÉES
 router.get("/sites", async (req, res) => {
-  let pool;
   try {
     console.log("🏢 Calcul des statistiques par site...");
     
-    pool = await poolPromise;
-    
-    const result = await pool.request().query(`
+    const result = await query(`
       SELECT 
-        [SITE DE RETRAIT] as site,
+        "SITE DE RETRAIT" as site,
         COUNT(*) as total,
         SUM(CASE 
-          WHEN DELIVRANCE IS NOT NULL 
-          AND LTRIM(RTRIM(ISNULL(DELIVRANCE, ''))) != '' 
+          WHEN delivrance IS NOT NULL 
+          AND TRIM(COALESCE(delivrance, '')) != '' 
           THEN 1 ELSE 0 
         END) as retires
-      FROM dbo.Cartes
-      WHERE [SITE DE RETRAIT] IS NOT NULL 
-      AND LTRIM(RTRIM(ISNULL([SITE DE RETRAIT], ''))) != ''
-      GROUP BY [SITE DE RETRAIT]
+      FROM cartes
+      WHERE "SITE DE RETRAIT" IS NOT NULL 
+      AND TRIM(COALESCE("SITE DE RETRAIT", '')) != ''
+      GROUP BY "SITE DE RETRAIT"
       ORDER BY total DESC
     `);
 
-    const stats = result.recordset.map(row => ({
+    const stats = result.rows.map(row => ({
       site: row.site,
       total: parseInt(row.total) || 0,
       retires: parseInt(row.retires) || 0,
@@ -85,41 +79,38 @@ router.get("/sites", async (req, res) => {
 
 // 🔹 STATISTIQUES DÉTAILLÉES (tout en un)
 router.get("/detail", async (req, res) => {
-  let pool;
   try {
-    pool = await poolPromise;
-    
     // Exécuter les deux requêtes en parallèle
     const [globalesResult, sitesResult] = await Promise.all([
-      pool.request().query(`
+      query(`
         SELECT 
           COUNT(*) as total,
           SUM(CASE 
-            WHEN DELIVRANCE IS NOT NULL 
-            AND LTRIM(RTRIM(ISNULL(DELIVRANCE, ''))) != '' 
+            WHEN delivrance IS NOT NULL 
+            AND TRIM(COALESCE(delivrance, '')) != '' 
             THEN 1 ELSE 0 
           END) as retires
-        FROM dbo.Cartes
+        FROM cartes
       `),
-      pool.request().query(`
+      query(`
         SELECT 
-          [SITE DE RETRAIT] as site,
+          "SITE DE RETRAIT" as site,
           COUNT(*) as total,
           SUM(CASE 
-            WHEN DELIVRANCE IS NOT NULL 
-            AND LTRIM(RTRIM(ISNULL(DELIVRANCE, ''))) != '' 
+            WHEN delivrance IS NOT NULL 
+            AND TRIM(COALESCE(delivrance, '')) != '' 
             THEN 1 ELSE 0 
           END) as retires
-        FROM dbo.Cartes
-        WHERE [SITE DE RETRAIT] IS NOT NULL 
-        AND LTRIM(RTRIM(ISNULL([SITE DE RETRAIT], ''))) != ''
-        GROUP BY [SITE DE RETRAIT]
+        FROM cartes
+        WHERE "SITE DE RETRAIT" IS NOT NULL 
+        AND TRIM(COALESCE("SITE DE RETRAIT", '')) != ''
+        GROUP BY "SITE DE RETRAIT"
         ORDER BY total DESC
       `)
     ]);
 
-    const globales = globalesResult.recordset[0];
-    const sites = sitesResult.recordset;
+    const globales = globalesResult.rows[0];
+    const sites = sitesResult.rows;
 
     const response = {
       globales: {
@@ -151,8 +142,6 @@ router.post("/refresh", async (req, res) => {
   try {
     console.log("🔄 Forçage du recalcul des statistiques...");
     
-    // Cette endpoint ne fait rien de spécial car les stats sont déjà en temps réel
-    // Mais il sert de point de synchronisation
     res.json({ 
       message: "Synchronisation des statistiques déclenchée",
       timestamp: new Date().toISOString()
