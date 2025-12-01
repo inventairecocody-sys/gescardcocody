@@ -19,10 +19,29 @@ exports.authenticateAPI = (req, res, next) => {
     ip: req.ip,
     method: req.method,
     url: req.url,
-    tokenPresent: !!token
+    path: req.path,
+    originalUrl: req.originalUrl,
+    tokenPresent: !!token,
+    origin: req.headers.origin || 'undefined'
   });
 
-  // Vérifier la présence du token
+  // ✅ CORRECTION : Routes publiques (basées sur le dernier segment du chemin)
+  const publicRoutes = ['health', 'sites', 'changes', 'cors-test'];
+  
+  // Extraire le dernier segment du chemin
+  const pathParts = req.path.split('/').filter(part => part.length > 0);
+  const lastSegment = pathParts[pathParts.length - 1] || '';
+  
+  console.log('🔐 DEBUG - Dernier segment du chemin:', lastSegment);
+  console.log('🔐 DEBUG - Tous les segments:', pathParts);
+  
+  // Vérifier si c'est une route publique
+  if (publicRoutes.includes(lastSegment)) {
+    console.log('✅ Route publique détectée - accès autorisé sans token');
+    return next();
+  }
+
+  // Pour les autres routes, vérifier le token
   if (!token) {
     console.log('❌ Accès API refusé: token manquant');
     return res.status(401).json({

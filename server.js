@@ -29,6 +29,7 @@ const allowedOrigins = [
   'http://localhost:5174',                        // Dev alternative port
   'http://127.0.0.1:5173',                       // Dev localhost
   'http://127.0.0.1:3000',                       // Dev backend local
+  undefined                                       // Pour les requêtes sans origine
 ];
 
 const corsOptions = {
@@ -41,7 +42,7 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    // Accepter les requêtes sans origine
+    // Accepter les requêtes sans origine (pour les tests, curl, etc.)
     if (!origin) {
       console.log('📡 [CORS] Requête sans origine - Autorisée');
       return callback(null, true);
@@ -65,9 +66,10 @@ const corsOptions = {
     'Accept',
     'Origin',
     'Access-Control-Request-Method',
-    'Access-Control-Request-Headers'
+    'Access-Control-Request-Headers',
+    'X-API-Token' // Important pour l'API externe
   ],
-  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range', 'Content-Disposition'],
   maxAge: 86400,
   preflightContinue: false,
   optionsSuccessStatus: 200
@@ -81,14 +83,14 @@ app.options('*', cors(corsOptions));
 
 // Middleware de logging
 app.use((req, res, next) => {
-  console.log(`📨 ${req.method} ${req.url} - Origin: ${req.headers.origin}`);
+  console.log(`📨 ${req.method} ${req.url} - Origin: ${req.headers.origin || 'undefined'}`);
   next();
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// ========== ROUTES DE TEST ==========
+// ========== ROUTES DE TEST ET DIAGNOSTIC ==========
 
 // Test de connexion PostgreSQL
 app.get("/api/test-db", async (req, res) => {
@@ -112,23 +114,66 @@ app.get("/api/test-db", async (req, res) => {
   }
 });
 
+// Route de diagnostic pour l'API externe
+app.get("/api/debug/external", async (req, res) => {
+  try {
+    const result = await query("SELECT NOW() as time, version() as pg_version");
+    res.json({
+      status: "API externe fonctionnelle",
+      database: "Connecté",
+      time: result.rows[0].time,
+      version: result.rows[0].pg_version.split(',')[0],
+      routes_externes: [
+        "GET /api/external/health (publique)",
+        "GET /api/external/changes (publique)",
+        "GET /api/external/sites (publique)",
+        "GET /api/external/cors-test (publique)",
+        "GET /api/external/cartes (protégée)",
+        "POST /api/external/sync (protégée)",
+        "GET /api/external/stats (protégée)",
+        "GET /api/external/modifications (protégée)"
+      ],
+      cors: {
+        origin: req.headers.origin || 'undefined',
+        allowed: allowedOrigins.includes(req.headers.origin) || !req.headers.origin ? 'true' : 'false',
+        mode: process.env.NODE_ENV || 'development'
+      },
+      authentication: {
+        token_required: "Oui pour les routes protégées",
+        public_routes: "health, changes, sites, cors-test",
+        header_token: "X-API-Token: CARTES_API_2025_SECRET_TOKEN_NOV"
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      status: "API externe en erreur"
+    });
+  }
+});
+
 // Racine API
 app.get("/api", (req, res) => {
   res.json({
     message: "🚀 API CartesProject - PostgreSQL Edition",
     database: "PostgreSQL",
-    version: "1.0.0",
+    version: "1.1.0",
     environment: process.env.NODE_ENV || 'development',
     deployment: "Render",
     cors: {
-      allowed_origins: allowedOrigins,
-      status: "configured"
+      allowed_origins: allowedOrigins.filter(o => o !== undefined),
+      status: "configured",
+      request_origin: req.headers.origin || 'none'
     },
     routes: {
       public: [
         "GET /api/test-db", 
         "POST /api/auth/login",
-        "GET /api"
+        "GET /api",
+        "GET /api/health",
+        "GET /api/cors-test",
+        "GET /api/debug/external"
       ],
       protected: [
         "GET /api/cartes",
@@ -142,12 +187,21 @@ app.get("/api", (req, res) => {
         "GET /api/statistiques/detail",
         "POST /api/statistiques/refresh"
       ],
-      external: [
-        "GET /api/external/health",
-        "GET /api/external/cartes",
-        "POST /api/external/sync", 
-        "GET /api/external/stats"
-      ],
+      external_api: {
+        public: [
+          "GET /api/external/health",
+          "GET /api/external/changes",
+          "GET /api/external/sites",
+          "GET /api/external/cors-test"
+        ],
+        protected: [
+          "GET /api/external/cartes",
+          "POST /api/external/sync", 
+          "GET /api/external/stats",
+          "GET /api/external/modifications"
+        ],
+        authentication: "X-API-Token header or api_token query param"
+      },
       administration: [
         "POST /api/utilisateurs",
         "PUT /api/utilisateurs/:id",
@@ -160,6 +214,7 @@ app.get("/api", (req, res) => {
       database: "PostgreSQL",
       api: "En ligne",
       cors: "Actif",
+      external_api: "Actif avec fusion intelligente",
       timestamp: new Date().toISOString()
     }
   });
@@ -187,8 +242,12 @@ app.get("/api/health", async (req, res) => {
       },
       cors: {
         status: "enabled",
-        allowed_origins: allowedOrigins,
+        allowed_origins: allowedOrigins.filter(o => o !== undefined),
         request_origin: req.headers.origin || 'none'
+      },
+      external_api: {
+        status: "active",
+        features: ["fusion_intelligente", "synchronisation", "changes_api"]
       },
       statistics: {
         total_cartes: parseInt(statsResult.rows[0].total_cartes),
@@ -225,7 +284,7 @@ app.get("/api/cors-test", (req, res) => {
     message: "✅ Test CORS réussi",
     your_origin: req.headers.origin || 'Non spécifié',
     cors_status: "Actif",
-    allowed_origins: allowedOrigins,
+    allowed_origins: allowedOrigins.filter(o => o !== undefined),
     timestamp: new Date().toISOString()
   });
 });
@@ -249,9 +308,17 @@ app.get("/", (req, res) => {
     documentation: `http://localhost:${PORT}/api`,
     health_check: `http://localhost:${PORT}/api/health`,
     cors_test: `http://localhost:${PORT}/api/cors-test`,
+    external_api_debug: `http://localhost:${PORT}/api/debug/external`,
     database: "PostgreSQL",
     deployment: "Render",
-    cors: "Configuré pour gescardcocody.netlify.app"
+    cors: "Configuré pour gescardcocody.netlify.app",
+    version: "1.1.0",
+    features: [
+      "Fusion intelligente multi-colonnes",
+      "API externe avec token",
+      "Synchronisation incrémentielle",
+      "Gestion des conflits automatique"
+    ]
   });
 });
 
@@ -259,6 +326,7 @@ app.get("/", (req, res) => {
 
 // 404 - Gestion des routes non trouvées
 app.use((req, res) => {
+  console.warn(`🔍 Route non trouvée: ${req.method} ${req.url}`);
   res.status(404).json({
     success: false,
     message: "Route non trouvée",
@@ -269,7 +337,8 @@ app.use((req, res) => {
       documentation: "GET /api",
       health_check: "GET /api/health",
       cors_test: "GET /api/cors-test",
-      database_test: "GET /api/test-db"
+      database_test: "GET /api/test-db",
+      external_debug: "GET /api/debug/external"
     }
   });
 });
@@ -284,7 +353,8 @@ app.use((err, req, res, next) => {
       success: false,
       message: "Accès interdit par CORS",
       error: `L'origine '${req.headers.origin || 'undefined'}' n'est pas autorisée`,
-      allowed_origins: allowedOrigins
+      allowed_origins: allowedOrigins.filter(o => o !== undefined),
+      help: "Contactez l'administrateur pour ajouter votre origine"
     });
   }
   
@@ -329,13 +399,25 @@ app.use((err, req, res, next) => {
       details: "Référence à un enregistrement inexistant"
     });
   }
+  
+  // Erreur de pool de connexions
+  if (err.message && err.message.includes('pool')) {
+    console.error('❌ Erreur pool PostgreSQL:', err);
+    return res.status(503).json({
+      success: false,
+      message: "Service temporairement indisponible",
+      error: "Problème de connexion à la base de données",
+      timestamp: new Date().toISOString()
+    });
+  }
 
   // Erreur générique
   res.status(500).json({
     success: false,
     message: "Erreur interne du serveur",
     error: process.env.NODE_ENV === 'development' ? err.message : 'Une erreur est survenue',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -344,6 +426,7 @@ app.use((err, req, res, next) => {
 // Gestion des promesses non catchées
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Promesse rejetée non gérée:', reason);
+  console.error('❌ Promesse:', promise);
 });
 
 process.on('uncaughtException', (error) => {
@@ -357,15 +440,20 @@ app.listen(PORT, () => {
   console.log(`📖 Documentation: http://localhost:${PORT}/api`);
   console.log(`🔧 Health Check: http://localhost:${PORT}/api/health`);
   console.log(`🌐 CORS Test: http://localhost:${PORT}/api/cors-test`);
+  console.log(`🐛 Debug API externe: http://localhost:${PORT}/api/debug/external`);
   console.log(`🌐 Environnement: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🗄️ Base de données: PostgreSQL`);
   console.log(`☁️  Déploiement: Render`);
   console.log(`🔒 CORS configuré pour: https://gescardcocody.netlify.app`);
   console.log(`⏰ Démarrage: ${new Date().toLocaleString()}`);
+  console.log(`🔑 Token API externe: CARTES_API_2025_SECRET_TOKEN_NOV`);
   
   // Message spécifique pour PostgreSQL
   if (process.env.DATABASE_URL) {
-    console.log(`🔗 Connexion DB: ${process.env.DATABASE_URL.split('@')[1]?.split('/')[0] || 'Render PostgreSQL'}`);
+    const dbInfo = process.env.DATABASE_URL.split('@')[1];
+    if (dbInfo) {
+      console.log(`🔗 Connexion DB: ${dbInfo.split('/')[0]}`);
+    }
   }
 });
 

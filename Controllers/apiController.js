@@ -278,6 +278,67 @@ exports.healthCheck = async (req, res) => {
   }
 };
 
+// 🔹 NOUVELLE FONCTION: getChanges (pour la synchronisation)
+exports.getChanges = async (req, res) => {
+  try {
+    const { since } = req.query;
+    
+    console.log('📡 Récupération des changements depuis:', since);
+    
+    // Si since n'est pas fourni, utiliser 24h
+    const sinceDate = since 
+      ? new Date(since)
+      : new Date(Date.now() - 24 * 60 * 60 * 1000); // 24h par défaut
+    
+    let query = `
+      SELECT 
+        id,
+        "LIEU D'ENROLEMENT",
+        "SITE DE RETRAIT",
+        rangement,
+        nom,
+        prenoms,
+        "DATE DE NAISSANCE",
+        "LIEU NAISSANCE",
+        contact,
+        delivrance,
+        "CONTACT DE RETRAIT",
+        "DATE DE DELIVRANCE",
+        dateimport,
+        'UPDATE' as operation
+      FROM cartes 
+      WHERE dateimport > $1
+      ORDER BY dateimport ASC
+      LIMIT 1000
+    `;
+    
+    const result = await db.query(query, [sinceDate]);
+    
+    const derniereModification = result.rows.length > 0
+      ? result.rows[result.rows.length - 1].dateimport
+      : sinceDate.toISOString();
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      total: result.rows.length,
+      derniereModification: derniereModification,
+      since: sinceDate.toISOString(),
+      timestamp: new Date().toISOString(),
+      note: 'Utilisez le paramètre ?since=YYYY-MM-DDTHH:mm:ss pour la synchronisation incrémentielle'
+    });
+    
+  } catch (error) {
+    console.error('❌ Erreur getChanges:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erreur lors de la récupération des changements',
+      details: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+};
+
 // 🔹 SYNCHRONISATION AVEC FUSION INTELLIGENTE COMPLÈTE
 exports.syncData = async (req, res) => {
   const client = await db.getClient();
