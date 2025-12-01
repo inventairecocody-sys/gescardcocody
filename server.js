@@ -20,65 +20,75 @@ const externalApiRoutes = require("./routes/externalApi");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 🔥 CORS CORRIGÉ - Configuration complète
+// ========== CONFIGURATION CORS COMPLÈTE ==========
+const allowedOrigins = [
+  'https://gescardcocody.netlify.app',            // Production frontend
+  'https://gescardcocodybackend.onrender.com',    // Backend lui-même
+  'http://localhost:5173',                        // Dev Vite
+  'http://localhost:3000',                        // Dev backend
+  'http://localhost:5174',                        // Dev alternative port
+  'http://127.0.0.1:5173',                       // Dev localhost
+  'http://127.0.0.1:3000',                       // Dev backend local
+];
+
 const corsOptions = {
-  origin: (origin, callback) => {
-    // Domaines autorisés
-    const allowedOrigins = [
-      'https://gescardcocody.netlify.app', // ✅ VOTRE DOMAINE NETLIFY
-      'https://votre-frontend.vercel.app', 
-      'http://localhost:5173',
-      'http://localhost:3000',
-      'https://gescardcocody-frontend.netlify.app' // Au cas où
-    ];
+  origin: function (origin, callback) {
+    console.log(`🌐 [CORS] Requête reçue depuis: ${origin || 'undefined/origin'}`);
     
-    // En développement, autoriser toutes les origines
+    // Mode développement: tout autoriser
     if (process.env.NODE_ENV !== 'production') {
-      console.log(`🔧 CORS Development - Origin: ${origin}`);
+      console.log('🔧 [CORS] Mode développement - Toutes origines autorisées');
       return callback(null, true);
     }
     
-    // En production, vérifier l'origine
+    // Accepter les requêtes sans origine
+    if (!origin) {
+      console.log('📡 [CORS] Requête sans origine - Autorisée');
+      return callback(null, true);
+    }
+    
+    // Vérifier l'origine
     if (allowedOrigins.includes(origin)) {
-      console.log(`✅ CORS autorisé pour: ${origin}`);
+      console.log(`✅ [CORS] Origine autorisée: ${origin}`);
       callback(null, true);
     } else {
-      console.warn(`🚫 CORS bloqué pour: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
+      console.warn(`🚫 [CORS] Origine BLOQUÉE: ${origin}`);
+      callback(new Error(`Accès interdit par CORS. Origine "${origin}" non autorisée.`));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
+    'Content-Type',
+    'Authorization',
     'X-Requested-With',
     'Accept',
     'Origin',
     'Access-Control-Request-Method',
     'Access-Control-Request-Headers'
   ],
-  exposedHeaders: [
-    'Content-Range',
-    'X-Content-Range'
-  ],
-  maxAge: 86400, // Cache preflight pendant 24 heures
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400,
+  preflightContinue: false,
   optionsSuccessStatus: 200
 };
 
+// Appliquer CORS globalement
 app.use(cors(corsOptions));
 
-// Gestion explicite des pré-vols OPTIONS
+// Gestion explicite des requêtes OPTIONS
 app.options('*', cors(corsOptions));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Log des requêtes avec origine
+// Middleware de logging
 app.use((req, res, next) => {
   console.log(`📨 ${req.method} ${req.url} - Origin: ${req.headers.origin}`);
   next();
 });
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ========== ROUTES DE TEST ==========
 
 // Test de connexion PostgreSQL
 app.get("/api/test-db", async (req, res) => {
@@ -111,11 +121,7 @@ app.get("/api", (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     deployment: "Render",
     cors: {
-      allowed_origins: [
-        'https://gescardcocody.netlify.app',
-        'https://votre-frontend.vercel.app',
-        'http://localhost:5173'
-      ],
+      allowed_origins: allowedOrigins,
       status: "configured"
     },
     routes: {
@@ -159,25 +165,11 @@ app.get("/api", (req, res) => {
   });
 });
 
-// Routes principales
-app.use("/api/auth", authRoutes);
-app.use("/api/utilisateurs", utilisateursRoutes);
-app.use("/api/cartes", cartesRoutes);
-app.use("/api/inventaire", inventaireRoutes);
-app.use("/api/import-export", importExportRoutes);
-app.use("/api/journal", journalRoutes);
-app.use("/api/log", logRoutes);
-app.use("/api/profil", profilRoutes);
-app.use("/api/statistiques", statistiquesRoutes);
-app.use("/api/external", externalApiRoutes);
-
-// Route de santé globale avec info CORS
+// Route de santé globale
 app.get("/api/health", async (req, res) => {
   try {
-    // Test de la base de données
     const dbResult = await query("SELECT NOW() as server_time, current_database() as database_name, version() as postgres_version");
     
-    // Statistiques basiques
     const statsResult = await query(`
       SELECT 
         (SELECT COUNT(*) FROM cartes) as total_cartes,
@@ -195,10 +187,7 @@ app.get("/api/health", async (req, res) => {
       },
       cors: {
         status: "enabled",
-        allowed_origins: [
-          'https://gescardcocody.netlify.app',
-          'http://localhost:5173'
-        ],
+        allowed_origins: allowedOrigins,
         request_origin: req.headers.origin || 'none'
       },
       statistics: {
@@ -236,15 +225,24 @@ app.get("/api/cors-test", (req, res) => {
     message: "✅ Test CORS réussi",
     your_origin: req.headers.origin || 'Non spécifié',
     cors_status: "Actif",
-    allowed_origins: [
-      'https://gescardcocody.netlify.app',
-      'http://localhost:5173'
-    ],
+    allowed_origins: allowedOrigins,
     timestamp: new Date().toISOString()
   });
 });
 
-// Route test racine
+// ========== MONTAGE DES ROUTES PRINCIPALES ==========
+app.use("/api/auth", authRoutes);
+app.use("/api/utilisateurs", utilisateursRoutes);
+app.use("/api/cartes", cartesRoutes);
+app.use("/api/inventaire", inventaireRoutes);
+app.use("/api/import-export", importExportRoutes);
+app.use("/api/journal", journalRoutes);
+app.use("/api/log", logRoutes);
+app.use("/api/profil", profilRoutes);
+app.use("/api/statistiques", statistiquesRoutes);
+app.use("/api/external", externalApiRoutes);
+
+// ========== ROUTE RACINE ==========
 app.get("/", (req, res) => {
   res.json({
     message: "🚀 API CartesProject PostgreSQL en ligne !",
@@ -256,6 +254,8 @@ app.get("/", (req, res) => {
     cors: "Configuré pour gescardcocody.netlify.app"
   });
 });
+
+// ========== GESTION DES ERREURS ==========
 
 // 404 - Gestion des routes non trouvées
 app.use((req, res) => {
@@ -279,15 +279,12 @@ app.use((err, req, res, next) => {
   console.error("❌ Erreur serveur:", err);
   
   // Erreur CORS spécifique
-  if (err.message === 'Not allowed by CORS') {
+  if (err.message === 'Not allowed by CORS' || err.message.includes('CORS')) {
     return res.status(403).json({
       success: false,
       message: "Accès interdit par CORS",
-      error: `L'origine '${req.headers.origin}' n'est pas autorisée`,
-      allowed_origins: [
-        'https://gescardcocody.netlify.app',
-        'http://localhost:5173'
-      ]
+      error: `L'origine '${req.headers.origin || 'undefined'}' n'est pas autorisée`,
+      allowed_origins: allowedOrigins
     });
   }
   
@@ -342,6 +339,8 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ========== GESTION DES PROCESS ==========
+
 // Gestion des promesses non catchées
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Promesse rejetée non gérée:', reason);
@@ -352,7 +351,7 @@ process.on('uncaughtException', (error) => {
   process.exit(1);
 });
 
-// Lancement du serveur
+// ========== LANCEMENT DU SERVEUR ==========
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
   console.log(`📖 Documentation: http://localhost:${PORT}/api`);
