@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const apiController = require('../controllers/apiController');
+const apiController = require('../Controllers/apiController');
 const { authenticateAPI, logAPIAccess } = require('../middleware/apiAuth');
 
 // 🔐 Middleware pour toutes les routes API externes
