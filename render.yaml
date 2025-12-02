@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: gescard-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cartes_database
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: EXTERNAL_API_TOKEN
+        generateValue: true
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=512
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: uploads
+      mountPath: /opt/render/project/src/uploads
+      sizeGB: 1

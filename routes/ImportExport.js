@@ -3,11 +3,11 @@ const router = express.Router();
 const importExportController = require('../Controllers/importExportController');
 const multer = require('multer');
 const { verifyToken } = require('../middleware/auth');
-const importExportAccess = require('../middleware/importExportAccess'); // ✅ NOUVEAU MIDDLEWARE
+const { importExportAccess, importExportRateLimit } = require('../middleware/importExportAccess');
 
 // ✅ APPLIQUER L'AUTHENTIFICATION ET LES PERMISSIONS IMPORT/EXPORT
 router.use(verifyToken);
-router.use(importExportAccess); // ✅ RESTREINT L'ACCÈS
+router.use(importExportAccess);
 
 // Configuration Multer pour upload Excel
 const storage = multer.diskStorage({
@@ -43,12 +43,22 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB max
 });
 
-// Routes principales - PROTÉGÉES PAR importExportAccess
-router.post('/import', upload.single('file'), importExportController.importExcel);
-router.get('/export', importExportController.exportExcel);
-router.get('/export-resultats', importExportController.exportResultats);
+// 🔥 ROUTES PRINCIPALES - AVEC RATE LIMITING
+router.post('/import', importExportRateLimit, upload.single('file'), importExportController.importExcel);
+router.post('/import/smart-sync', importExportRateLimit, upload.single('file'), importExportController.importSmartSync); // ✅ NOUVEAU
+router.post('/import/filtered', importExportRateLimit, upload.single('file'), importExportController.importFiltered); // ✅ NOUVEAU
+
+router.get('/export', importExportRateLimit, importExportController.exportExcel);
+router.get('/export/stream', importExportRateLimit, importExportController.exportStream); // ✅ NOUVEAU (optimisé)
+router.post('/export/filtered', importExportRateLimit, importExportController.exportFiltered); // ✅ NOUVEAU
+router.get('/export-resultats', importExportRateLimit, importExportController.exportResultats);
 router.get('/template', importExportController.downloadTemplate);
 router.get('/export-pdf', importExportController.exportPDF);
+
+// 🔧 ROUTES UTILITAIRES
+router.get('/sites', importExportController.getSitesList); // ✅ Liste des sites
+router.get('/stats', importExportController.getImportStats); // ✅ Statistiques
+router.get('/export-status/:batchId', importExportController.getExportStatus); // ✅ Suivi export
 
 // 🎯 ROUTES ADMIN POUR LA JOURNALISATION (admin seulement)
 const adminOnly = require('../middleware/adminOnly');
@@ -81,7 +91,7 @@ router.post('/annuler-import', adminOnly, async (req, res) => {
   }
 });
 
-// Gestion d'erreurs multer
+// 🛡️ GESTION D'ERREURS MULTER
 router.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
