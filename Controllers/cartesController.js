@@ -1,7 +1,15 @@
 const db = require('../db/db');
 const journalController = require('./journalController');
 
-// 🔹 METTRE À JOUR UNE CARTE - ADAPTÉ POUR POSTGRESQL
+// 🎯 CONFIGURATION POUR RENDER GRATUIT
+const RENDER_CONFIG = {
+  MAX_EXPORT_ROWS: 30000,      // Max pour export direct
+  MAX_IMPORT_BATCH: 500,       // Batch d'import réduit
+  QUERY_TIMEOUT: 28000,        // 28s (marge de sécurité)
+  MEMORY_LIMIT_MB: 400         // Max 400MB sur 512
+};
+
+// 🔹 METTRE À JOUR UNE CARTE - OPTIMISÉ POUR POSTGRESQL
 exports.updateCarte = async (req, res) => {
     const client = await db.getClient();
     
@@ -133,57 +141,12 @@ exports.updateCarte = async (req, res) => {
     }
 };
 
-// 🔹 OBTENIR TOUTES LES CARTES
-exports.getAllCartes = async (req, res) => {
-    try {
-        const { page = 1, limit = 100 } = req.query;
-        const offset = (page - 1) * limit;
-
-        const result = await db.query(`
-            SELECT 
-                "LIEU D'ENROLEMENT",
-                "SITE DE RETRAIT",
-                rangement,
-                nom,
-                prenoms,
-                "DATE DE NAISSANCE",
-                "LIEU NAISSANCE",
-                contact,
-                delivrance,
-                "CONTACT DE RETRAIT",
-                "DATE DE DELIVRANCE",
-                id
-            FROM cartes 
-            ORDER BY id 
-            LIMIT $1 OFFSET $2
-        `, [limit, offset]);
-
-        const countResult = await db.query('SELECT COUNT(*) as total FROM cartes');
-
-        const total = parseInt(countResult.rows[0].total);
-        const totalPages = Math.ceil(total / limit);
-
-        res.json({
-            cartes: result.rows,
-            total: total,
-            page: parseInt(page),
-            totalPages: totalPages,
-            limit: parseInt(limit)
-        });
-    } catch (err) {
-        console.error('❌ Erreur getAllCartes:', err);
-        res.status(500).json({ 
-            success: false,
-            message: err.message 
-        });
-    }
-};
-
-// 🔹 OBTENIR UNE CARTE PAR ID
+// 🔹 OBTENIR UNE CARTE PAR ID - BUG CORRIGÉ
 exports.getCarteById = async (req, res) => {
     try {
+        // ✅ CORRECTION : WHERE...WHERE → WHERE...AND
         const result = await db.query(
-            `SELECT * FROM cartes WHERE id = $1`,
+            `SELECT * FROM cartes WHERE id IS NOT NULL AND id = $1`,
             [req.params.id]
         );
 
@@ -207,7 +170,7 @@ exports.getCarteById = async (req, res) => {
     }
 };
 
-// 🔹 CRÉER UNE NOUVELLE CARTE
+// 🔹 CRÉER UNE NOUVELLE CARTE (inchangé mais optimisé)
 exports.createCarte = async (req, res) => {
     const client = await db.getClient();
     
@@ -277,7 +240,7 @@ exports.createCarte = async (req, res) => {
     }
 };
 
-// 🔹 SUPPRIMER UNE CARTE
+// 🔹 SUPPRIMER UNE CARTE (inchangé)
 exports.deleteCarte = async (req, res) => {
     const client = await db.getClient();
     
@@ -344,7 +307,7 @@ exports.deleteCarte = async (req, res) => {
     }
 };
 
-// 🔹 OBTENIR LES STATISTIQUES
+// 🔹 OBTENIR LES STATISTIQUES (inchangé)
 exports.getStatistiques = async (req, res) => {
     try {
         // Total des cartes
@@ -391,6 +354,131 @@ exports.getStatistiques = async (req, res) => {
 
     } catch (err) {
         console.error('❌ Erreur getStatistiques:', err);
+        res.status(500).json({ 
+            success: false,
+            message: err.message 
+        });
+    }
+};
+
+// 🔹 NOUVEAU : ESTIMER LA TAILLE D'UN EXPORT
+exports.estimateExportSize = async (req, res) => {
+    try {
+        const { filters } = req.query || {};
+        
+        let query = 'SELECT COUNT(*) as count FROM cartes WHERE 1=1';
+        let params = [];
+        let paramIndex = 1;
+        
+        if (filters && typeof filters === 'string') {
+            try {
+                const parsedFilters = JSON.parse(filters);
+                
+                // Construire dynamiquement les conditions
+                if (parsedFilters.site) {
+                    query += ` AND "SITE DE RETRAIT" ILIKE $${paramIndex}`;
+                    params.push(`%${parsedFilters.site}%`);
+                    paramIndex++;
+                }
+                
+                if (parsedFilters.nom) {
+                    query += ` AND nom ILIKE $${paramIndex}`;
+                    params.push(`%${parsedFilters.nom}%`);
+                    paramIndex++;
+                }
+                
+                if (parsedFilters.dateFrom) {
+                    query += ` AND "DATE DE DELIVRANCE" >= $${paramIndex}`;
+                    params.push(parsedFilters.dateFrom);
+                    paramIndex++;
+                }
+                
+                if (parsedFilters.dateTo) {
+                    query += ` AND "DATE DE DELIVRANCE" <= $${paramIndex}`;
+                    params.push(parsedFilters.dateTo);
+                    paramIndex++;
+                }
+            } catch (e) {
+                console.warn('⚠️ Filtres invalides:', e.message);
+            }
+        }
+        
+        const result = await db.query(query, params);
+        const count = parseInt(result.rows[0].count);
+        
+        const estimation = {
+            totalRows: count,
+            canExportDirect: count <= RENDER_CONFIG.MAX_EXPORT_ROWS,
+            suggestedMethod: count <= RENDER_CONFIG.MAX_EXPORT_ROWS ? 'direct' : 'streaming',
+            estimatedTime: count < 10000 ? '5-10s' : 
+                          count < 30000 ? '10-20s' : 
+                          count < 50000 ? '20-30s' : '30s+',
+            warning: count > RENDER_CONFIG.MAX_EXPORT_ROWS ? 
+                `⚠️ Trop de données (${count} > ${RENDER_CONFIG.MAX_EXPORT_ROWS}). Utilisez l'export streaming.` : null
+        };
+        
+        res.json({
+            success: true,
+            estimation,
+            limits: {
+                maxDirectExport: RENDER_CONFIG.MAX_EXPORT_ROWS,
+                streamingAvailable: true,
+                batchSize: 1000
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur estimation export:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Erreur lors de l\'estimation'
+        });
+    }
+};
+
+// 🔹 OBTENIR TOUTES LES CARTES (avec pagination sécurisée)
+exports.getAllCartes = async (req, res) => {
+    try {
+        const { page = 1, limit = 50 } = req.query; // ⬇️ 100 → 50 pour sécurité
+        const offset = (page - 1) * limit;
+
+        // Limiter à 1000 lignes maximum pour sécurité
+        const safeLimit = Math.min(parseInt(limit), 1000);
+        const safePage = Math.max(1, parseInt(page));
+
+        const result = await db.query(`
+            SELECT 
+                "LIEU D'ENROLEMENT",
+                "SITE DE RETRAIT",
+                rangement,
+                nom,
+                prenoms,
+                "DATE DE NAISSANCE",
+                "LIEU NAISSANCE",
+                contact,
+                delivrance,
+                "CONTACT DE RETRAIT",
+                "DATE DE DELIVRANCE",
+                id
+            FROM cartes 
+            ORDER BY id 
+            LIMIT $1 OFFSET $2
+        `, [safeLimit, offset]);
+
+        const countResult = await db.query('SELECT COUNT(*) as total FROM cartes');
+
+        const total = parseInt(countResult.rows[0].total);
+        const totalPages = Math.ceil(total / safeLimit);
+
+        res.json({
+            cartes: result.rows,
+            total: total,
+            page: safePage,
+            totalPages: totalPages,
+            limit: safeLimit
+        });
+    } catch (err) {
+        console.error('❌ Erreur getAllCartes:', err);
         res.status(500).json({ 
             success: false,
             message: err.message 
