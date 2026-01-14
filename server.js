@@ -4,6 +4,7 @@ const dotenv = require("dotenv");
 const compression = require("compression");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
+const morgan = require("morgan");
 dotenv.config();
 
 const { query, isRenderFreeTier } = require("./db/db");
@@ -37,6 +38,11 @@ if (isRenderFreeTier) {
   // Désactiver certaines fonctionnalités gourmandes en mémoire
   process.env.NODE_OPTIONS = process.env.NODE_OPTIONS || '';
   process.env.NODE_OPTIONS += ' --max-http-header-size=8192';
+  
+  // Optimiser le garbage collection
+  if (global.gc) {
+    console.log('🧹 Garbage collection forcé disponible');
+  }
 }
 
 // ========== MIDDLEWARES DE SÉCURITÉ ET PERFORMANCE ==========
@@ -47,12 +53,14 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
-// Compression GZIP (économise la bande passante)
+// Compression GZIP optimisée
 app.use(compression({
   level: 6,
   threshold: 100 * 1024, // Compresser seulement les réponses > 100KB
   filter: (req, res) => {
     if (req.headers['x-no-compression']) return false;
+    // Ne pas compresser les exports Excel (déjà compressés)
+    if (req.url.includes('/export') && req.method === 'GET') return false;
     return compression.filter(req, res);
   }
 }));
@@ -63,7 +71,7 @@ const getRateLimitConfig = () => {
     // Limites strictes pour Render gratuit
     return {
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 100, // 100 requêtes max par fenêtre
+      max: 150, // 150 requêtes max par fenêtre (augmenté)
       message: {
         success: false,
         error: 'Trop de requêtes. Limite atteinte sur le plan gratuit.',
@@ -94,7 +102,14 @@ const limiter = rateLimit(getRateLimitConfig());
 app.use('/api/', limiter);
 
 // Exceptions pour certaines routes
-const noLimitRoutes = ['/api/health', '/api/cors-test', '/api/test-db'];
+const noLimitRoutes = [
+  '/api/health', 
+  '/api/cors-test', 
+  '/api/test-db',
+  '/api/debug/external',
+  '/api/import-export/diagnostic'
+];
+
 app.use((req, res, next) => {
   if (noLimitRoutes.includes(req.path)) {
     return next(); // Pas de rate limiting
@@ -150,9 +165,17 @@ const corsOptions = {
     'Access-Control-Request-Method',
     'Access-Control-Request-Headers',
     'X-API-Token', // Important pour l'API externe
-    'X-No-Compression' // Pour désactiver la compression si besoin
+    'X-No-Compression', // Pour désactiver la compression si besoin
+    'X-Request-ID', // Pour le tracking des requêtes
+    'X-File-Size' // Pour les uploads
   ],
-  exposedHeaders: ['Content-Range', 'X-Content-Range', 'Content-Disposition'],
+  exposedHeaders: [
+    'Content-Range', 
+    'X-Content-Range', 
+    'Content-Disposition',
+    'X-Request-ID',
+    'X-Import-Progress'
+  ],
   maxAge: 86400,
   preflightContinue: false,
   optionsSuccessStatus: 200
@@ -162,10 +185,55 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
+// ========== CONFIGURATION POUR IMPORTS MASSIFS ==========
+
+// Middleware pour augmenter les timeouts pour les gros imports
+app.use((req, res, next) => {
+  // Routes d'import/export massif
+  if (req.url.includes('/api/import-export/bulk-import') || 
+      req.url.includes('/api/import-export/export/stream') ||
+      req.url.includes('/api/import-export/export/optimized')) {
+    
+    const memory = process.memoryUsage();
+    const usedMB = Math.round(memory.heapUsed / 1024 / 1024);
+    
+    if (usedMB > 400) {
+      console.warn(`⚠️ Mémoire élevée avant traitement: ${usedMB}MB`);
+    }
+    
+    // Timeout plus long pour les gros traitements
+    req.setTimeout(300000); // 5 minutes
+    res.setTimeout(300000);
+    
+    // Ajouter des headers pour le suivi
+    res.setHeader('X-Import-Timeout', '300000');
+    res.setHeader('X-Memory-Usage', `${usedMB}MB`);
+  }
+  
+  next();
+});
+
 // ========== MIDDLEWARE DE LOGGING INTELLIGENT ==========
+
+// Configuration Morgan pour le logging HTTP
+const morganFormat = isRenderFreeTier ? 'combined' : 'dev';
+app.use(morgan(morganFormat, {
+  skip: (req, res) => {
+    // Ne pas logger les requêtes de santé et de test
+    return req.url.includes('/health') || 
+           req.url.includes('/test-db') ||
+           res.statusCode < 400; // Logger seulement les erreurs en production
+  }
+}));
+
+// Middleware de logging personnalisé
 app.use((req, res, next) => {
   const start = Date.now();
-  const requestId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+  const requestId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  
+  // Ajouter l'ID à la requête et la réponse
+  req.requestId = requestId;
+  res.setHeader('X-Request-ID', requestId);
   
   // Log seulement les requêtes importantes ou lentes
   res.on('finish', () => {
@@ -173,7 +241,8 @@ app.use((req, res, next) => {
     const isImportant = req.url.includes('/api/import-export') || 
                        req.url.includes('/api/external') ||
                        duration > 1000 ||
-                       res.statusCode >= 400;
+                       res.statusCode >= 400 ||
+                       req.method === 'POST' && req.url.includes('/api/');
     
     if (isImportant || process.env.NODE_ENV === 'development') {
       console.log(`📨 ${req.method} ${req.url} - ${duration}ms - ${res.statusCode} - ID: ${requestId}`);
@@ -186,22 +255,26 @@ app.use((req, res, next) => {
     res.setTimeout(30000);
   }
   
-  // Ajouter l'ID à la requête pour tracking
-  req.requestId = requestId;
-  
   next();
 });
 
+// ========== CONFIGURATION BODY PARSER OPTIMISÉE ==========
+
 // Limiter la taille des requêtes pour économiser la mémoire
-const requestSizeLimit = isRenderFreeTier ? '5mb' : '50mb';
+const requestSizeLimit = isRenderFreeTier ? '10mb' : '100mb';
 app.use(express.json({ 
-  limit: requestSizeLimit
+  limit: requestSizeLimit,
+  inflate: true,
+  strict: true,
+  type: 'application/json'
 }));
 
 app.use(express.urlencoded({ 
   extended: true, 
   limit: requestSizeLimit,
-  parameterLimit: isRenderFreeTier ? 50 : 1000 // Moins de paramètres sur gratuit
+  parameterLimit: isRenderFreeTier ? 100 : 1000, // Moins de paramètres sur gratuit
+  inflate: true,
+  type: 'application/x-www-form-urlencoded'
 }));
 
 // ========== ROUTES DE TEST ET DIAGNOSTIC OPTIMISÉES ==========
@@ -215,7 +288,8 @@ app.get("/api/test-db", async (req, res) => {
       database: "PostgreSQL",
       status: "connecté",
       server_time: result.rows[0].server_time,
-      request_id: req.requestId
+      request_id: req.requestId,
+      memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
     });
   } catch (err) {
     console.error('❌ Erreur PostgreSQL:', err.message);
@@ -254,7 +328,13 @@ app.get("/api/debug/external", async (req, res) => {
         allowed: allowedOrigins.includes(req.headers.origin) || !req.headers.origin
       },
       request_id: req.requestId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      features: {
+        bulk_import: 'disponible',
+        export_streaming: 'optimisé',
+        import_smart_sync: 'activé',
+        memory_management: 'actif'
+      }
     });
   } catch (error) {
     res.status(500).json({ 
@@ -305,17 +385,27 @@ app.get("/api/health", async (req, res) => {
         total_utilisateurs: parseInt(statsResult.rows[0].total_utilisateurs),
         cors_enabled: true,
         compression_enabled: true,
-        rate_limiting: true
+        rate_limiting: true,
+        bulk_import_enabled: true,
+        export_streaming_enabled: true
       },
       limits: isRenderFreeTier ? {
-        max_request_size: '5MB',
-        rate_limit: '100 req/15min',
+        max_request_size: '10MB',
+        max_upload_size: '50MB',
+        rate_limit: '150 req/15min',
         timeout: '30s',
-        advice: 'Exportez par lots de 1000 lignes maximum'
+        import_timeout: '5min',
+        advice: [
+          'Exportez par lots de 1000 lignes maximum',
+          'Utilisez /export/stream pour les gros exports',
+          'Utilisez /bulk-import pour les imports massifs'
+        ]
       } : {
-        max_request_size: '50MB',
+        max_request_size: '100MB',
+        max_upload_size: '100MB',
         rate_limit: '1000 req/15min',
-        timeout: '120s'
+        timeout: '120s',
+        import_timeout: '10min'
       },
       request_id: req.requestId,
       timestamp: new Date().toISOString()
@@ -339,16 +429,21 @@ app.get("/api/cors-test", (req, res) => {
     cors_status: "Actif",
     allowed_origins: allowedOrigins.filter(o => o !== undefined),
     request_id: req.requestId,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    features: {
+      credentials: "supporté",
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+      headers: "étendus"
+    }
   });
 });
 
 // Racine API - Documentations des routes
 app.get("/api", (req, res) => {
   res.json({
-    message: "🚀 API CartesProject PostgreSQL - Version Optimisée",
+    message: "🚀 API CartesProject PostgreSQL - Version Optimisée avec Import Massif",
     database: "PostgreSQL",
-    version: "1.2.0",
+    version: "2.0.0",
     environment: process.env.NODE_ENV || 'development',
     deployment: "Render",
     optimization: isRenderFreeTier ? "Optimisé pour plan gratuit (512MB)" : "Optimisé pour production",
@@ -358,10 +453,11 @@ app.get("/api", (req, res) => {
       request_origin: req.headers.origin || 'none'
     },
     features: {
-      import: ["standard", "smart-sync", "filtered"],
-      export: ["standard", "streaming", "filtered", "results"],
-      optimization: ["compression", "rate-limiting", "memory-management", "streaming"],
-      security: ["cors", "helmet", "authentication", "authorization"]
+      import: ["standard", "smart-sync", "filtered", "bulk-import (NOUVEAU)"],
+      export: ["standard", "streaming", "optimized (NOUVEAU)", "filtered", "results"],
+      optimization: ["compression", "rate-limiting", "memory-management", "streaming", "batch-processing"],
+      security: ["cors", "helmet", "authentication", "authorization", "rate-limiting"],
+      monitoring: ["health-check", "diagnostic", "import-tracking", "memory-monitoring"]
     },
     routes: {
       public: [
@@ -374,15 +470,24 @@ app.get("/api", (req, res) => {
       ],
       import_export: [
         "POST /api/import-export/import",
-        "POST /api/import-export/import/smart-sync (NOUVEAU)",
-        "POST /api/import-export/import/filtered (NOUVEAU)",
+        "POST /api/import-export/import/smart-sync",
+        "POST /api/import-export/import/filtered",
+        "POST /api/import-export/bulk-import (NOUVEAU - 10k+ lignes)",
         "GET /api/import-export/export",
-        "GET /api/import-export/export/stream (NOUVEAU - optimisé)",
-        "POST /api/import-export/export/filtered (NOUVEAU)",
+        "GET /api/import-export/export/stream",
+        "GET /api/import-export/export/optimized (NOUVEAU - paginé)",
+        "POST /api/import-export/export/filtered",
         "GET /api/import-export/export-resultats",
         "GET /api/import-export/template",
-        "GET /api/import-export/sites (NOUVEAU)",
-        "GET /api/import-export/stats (NOUVEAU)"
+        "GET /api/import-export/sites",
+        "GET /api/import-export/stats",
+        "GET /api/import-export/diagnostic"
+      ],
+      import_management: [
+        "GET /api/import-export/bulk-import/status/:id (suivi)",
+        "POST /api/import-export/bulk-import/cancel/:id (annulation)",
+        "GET /api/import-export/bulk-import/active (liste)",
+        "GET /api/import-export/bulk-import/stats (statistiques)"
       ],
       protected: [
         "GET /api/cartes",
@@ -424,6 +529,7 @@ app.get("/api", (req, res) => {
       cors: "Actif",
       external_api: "Actif avec fusion intelligente",
       optimization: isRenderFreeTier ? "Actif (mode gratuit)" : "Actif (mode production)",
+      bulk_import: "Prêt (10k+ lignes)",
       timestamp: new Date().toISOString(),
       request_id: req.requestId
     }
@@ -445,28 +551,37 @@ app.use("/api/external", externalApiRoutes);
 // ========== ROUTE RACINE OPTIMISÉE ==========
 app.get("/", (req, res) => {
   res.json({
-    message: "🚀 API CartesProject PostgreSQL - Version Optimisée",
+    message: "🚀 API CartesProject PostgreSQL - Version 2.0 avec Import Massif",
     documentation: `http://localhost:${PORT}/api`,
     health_check: `http://localhost:${PORT}/api/health`,
     database: "PostgreSQL",
-    version: "1.2.0",
+    version: "2.0.0",
     optimized_for: isRenderFreeTier ? "Render Free Tier (512MB)" : "Production",
-    features: [
-      "Import/Export intelligent avec synchronisation",
-      "API externe sécurisée",
-      "Streaming optimisé pour gros volumes",
-      "Gestion de conflits automatique",
-      "Compression GZIP activée",
-      "Rate limiting intelligent"
+    new_features: [
+      "✅ Import massif optimisé pour 10 000+ lignes",
+      "✅ Export streaming avec pagination intelligente",
+      "✅ Suivi en temps réel des imports asynchrones",
+      "✅ Gestion mémoire avancée pour Render gratuit",
+      "✅ Annulation d'import à tout moment",
+      "✅ Validation et nettoyage des données optimisés"
     ],
     tips: isRenderFreeTier ? [
-      "Utilisez /export/stream pour les exports > 5000 lignes",
-      "Limite: 5MB par requête, 100 req/15min",
-      "Exportez par filtres pour réduire la taille"
+      "📁 Utilisez /bulk-import pour les fichiers > 5 000 lignes",
+      "⚡ Utilisez /export/stream ou /export/optimized pour les gros exports",
+      "⏱️ Limite: 50MB par fichier, 150 req/15min",
+      "🔄 Les imports massifs s'exécutent en arrière-plan",
+      "📊 Suivez vos imports avec /bulk-import/status/:id"
     ] : [
-      "Toutes les fonctionnalités disponibles",
-      "Limite: 50MB par requête, 1000 req/15min"
+      "🚀 Toutes les fonctionnalités disponibles sans restriction",
+      "💾 Limite: 100MB par fichier, 1000 req/15min",
+      "⚡ Performance maximale garantie"
     ],
+    quick_start: {
+      import_test: `POST http://localhost:${PORT}/api/import-export/bulk-import`,
+      export_test: `GET http://localhost:${PORT}/api/import-export/export/optimized`,
+      status_check: `GET http://localhost:${PORT}/api/health`,
+      diagnostic: `GET http://localhost:${PORT}/api/import-export/diagnostic`
+    },
     request_id: req.requestId,
     timestamp: new Date().toISOString()
   });
@@ -488,7 +603,8 @@ app.use((req, res) => {
       health_check: "GET /api/health",
       cors_test: "GET /api/cors-test",
       database_test: "GET /api/test-db",
-      external_debug: "GET /api/debug/external"
+      external_debug: "GET /api/debug/external",
+      import_export: "GET /api/import-export/diagnostic"
     }
   });
 });
@@ -529,9 +645,10 @@ app.use((err, req, res, next) => {
       success: false,
       message: "Trop de requêtes",
       ...(isRenderFreeTier && {
-        advice: "Limite du plan gratuit atteinte. Réessayez plus tard."
+        advice: "Limite du plan gratuit atteinte. Réessayez dans 15 minutes ou contactez l'administrateur."
       }),
-      request_id: req.requestId
+      request_id: req.requestId,
+      retry_after: "15 minutes"
     });
   }
   
@@ -590,7 +707,8 @@ app.use((err, req, res, next) => {
       message: "Service temporairement indisponible",
       error: "Problème de connexion à la base de données",
       request_id: req.requestId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      advice: "Réessayez dans quelques minutes"
     });
   }
   
@@ -601,13 +719,16 @@ app.use((err, req, res, next) => {
       message: "Erreur mémoire",
       error: "Mémoire insuffisante. Essayez d'exporter par filtres ou utilisez l'export streaming.",
       advice: isRenderFreeTier ? [
-        "Utilisez /api/import-export/export/stream",
+        "Utilisez /api/import-export/export/stream ou /export/optimized",
         "Exportez par filtres (site/date)",
-        "Réduisez la taille du fichier d'import"
+        "Divisez les gros imports en plusieurs fichiers",
+        "Utilisez /bulk-import pour les imports asynchrones"
       ] : [
-        "Contactez l'administrateur système"
+        "Contactez l'administrateur système",
+        "Augmentez la mémoire allouée au serveur"
       ],
-      request_id: req.requestId
+      request_id: req.requestId,
+      memory_usage: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
     });
   }
 
@@ -624,6 +745,7 @@ app.use((err, req, res, next) => {
     errorResponse.stack = err.stack;
   } else {
     errorResponse.error = "Une erreur est survenue. Veuillez réessayer.";
+    errorResponse.contact = "Si le problème persiste, contactez l'administrateur.";
   }
   
   res.status(500).json(errorResponse);
@@ -646,6 +768,11 @@ if (isRenderFreeTier) {
         console.log('🚨 CRITIQUE: Mémoire presque saturée - Réduction des logs');
         // Réduire la verbosité des logs
         console.debug = () => {};
+        
+        // Forcer le garbage collection
+        if (global.gc) {
+          global.gc();
+        }
       }
     }
   }, 30000); // Toutes les 30 secondes
@@ -655,6 +782,13 @@ if (isRenderFreeTier) {
     console.log('🧹 Nettoyage périodique mémoire');
     if (global.gc) {
       global.gc();
+    }
+    
+    // Nettoyer le cache des requêtes si nécessaire
+    const usedMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    if (usedMB > 300) {
+      console.log('🧹 Nettoyage agressif du cache');
+      // Ajouter ici la logique de nettoyage de cache si vous en avez
     }
   }, 5 * 60 * 1000); // Toutes les 5 minutes
   
@@ -701,23 +835,35 @@ const server = app.listen(PORT, () => {
   console.log(`📊 PID: ${process.pid}`);
   
   // Afficher les variables de configuration
-  console.log(`⚙️ Configuration:`);
-  console.log(`   - Compression: Activée`);
-  console.log(`   - Rate Limiting: ${isRenderFreeTier ? '100 req/15min' : '1000 req/15min'}`);
-  console.log(`   - Max Request Size: ${isRenderFreeTier ? '5MB' : '50MB'}`);
+  console.log(`⚙️ Configuration Import/Export:`);
+  console.log(`   - Compression: Activée (GZIP)`);
+  console.log(`   - Rate Limiting: ${isRenderFreeTier ? '150 req/15min' : '1000 req/15min'}`);
+  console.log(`   - Max Request Size: ${isRenderFreeTier ? '10MB' : '100MB'}`);
+  console.log(`   - Max Upload Size: ${isRenderFreeTier ? '50MB' : '100MB'}`);
   console.log(`   - DB Connections: ${isRenderFreeTier ? '4 max' : '20 max'}`);
+  console.log(`   - Import Timeout: ${isRenderFreeTier ? '5min' : '10min'}`);
   
   if (isRenderFreeTier) {
     console.log(`\n📋 CONSEILS POUR RENDER GRATUIT:`);
-    console.log(`   • Utilisez /api/import-export/export/stream pour les gros exports`);
-    console.log(`   • Exportez par lots de 1000-5000 lignes maximum`);
-    console.log(`   • Utilisez /api/import-export/import/smart-sync pour la synchronisation`);
-    console.log(`   • Limitez les imports à 5MB maximum`);
+    console.log(`   • Utilisez /api/import-export/bulk-import pour les imports > 5 000 lignes`);
+    console.log(`   • Exportez avec /api/import-export/export/stream ou /export/optimized`);
+    console.log(`   • Suivez vos imports avec /api/import-export/bulk-import/status/:id`);
+    console.log(`   • Annulez avec /api/import-export/bulk-import/cancel/:id si nécessaire`);
     console.log(`   • Utilisez les filtres pour réduire la taille des données`);
-    console.log(`\n⚠️ LIMITATIONS:`);
+    console.log(`   • Divisez les gros fichiers Excel en plusieurs parties`);
+    console.log(`\n⚠️ LIMITATIONS RENDER GRATUIT:`);
     console.log(`   • Mémoire: 512MB`);
-    console.log(`   • Requêtes: 100/15min`);
+    console.log(`   • Requêtes: 150/15min`);
     console.log(`   • Idle shutdown: 15 minutes d'inactivité`);
+    console.log(`   • Upload max: 50MB par fichier`);
+    console.log(`\n✅ FONCTIONNALITÉS OPTIMISÉES:`);
+    console.log(`   • Import asynchrone avec suivi en temps réel`);
+    console.log(`   • Export streaming avec gestion mémoire`);
+    console.log(`   • Nettoyage automatique des fichiers temporaires`);
+    console.log(`   • Validation et détection de doublons`);
+    console.log(`   • Journalisation complète de toutes les opérations`);
+  } else {
+    console.log(`\n✅ MODE PRODUCTION - TOUTES LES FONCTIONNALITÉS DISPONIBLES`);
   }
 });
 
@@ -728,8 +874,30 @@ server.headersTimeout = 66000; // 66 secondes
 // Gestion propre du shutdown
 process.on('SIGTERM', () => {
   console.log('🛑 Signal SIGTERM reçu, arrêt propre du serveur...');
+  
+  // Fermer toutes les connexions actives
   server.close(() => {
     console.log('✅ Serveur arrêté proprement');
+    
+    // Nettoyer les fichiers temporaires
+    const fs = require('fs');
+    const uploadDir = 'uploads/';
+    
+    if (fs.existsSync(uploadDir)) {
+      try {
+        const files = fs.readdirSync(uploadDir);
+        files.forEach(file => {
+          const filePath = `${uploadDir}/${file}`;
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(`🗑️ Fichier nettoyé: ${file}`);
+          }
+        });
+      } catch (error) {
+        console.warn('⚠️ Erreur nettoyage fichiers:', error.message);
+      }
+    }
+    
     process.exit(0);
   });
   

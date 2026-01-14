@@ -6,19 +6,20 @@ const { v4: uuidv4 } = require('uuid');
 const journalController = require('./journalController');
 const { Transform } = require('stream');
 
-// 🔧 CONFIGURATION CENTRALISÉE
+// 🔧 CONFIGURATION CENTRALISÉE - OPTIMISÉE POUR 10K+ LIGNES
 const CONFIG = {
   maxErrorDisplay: 10,
   dateFormat: 'YYYY-MM-DD',
   phoneFormat: '@',
-  maxFileSize: 10 * 1024 * 1024,
+  maxFileSize: 50 * 1024 * 1024, // Augmenté à 50MB
   uploadDir: 'uploads/',
-  batchSize: 100,
+  batchSize: 500,
   
   // ⚠️ CONFIGURATION POUR RENDER GRATUIT
   renderFreeTier: db.isRenderFreeTier,
-  exportBatchSize: db.isRenderFreeTier ? 1000 : 5000, // 1000 lignes par batch sur Render gratuit
-  importBatchSize: db.isRenderFreeTier ? 500 : 2000,  // 500 lignes par batch sur Render gratuit
+  exportBatchSize: db.isRenderFreeTier ? 1000 : 5000,
+  importBatchSize: db.isRenderFreeTier ? 500 : 2000,
+  maxConcurrentImports: 2, // Limité sur Render gratuit
   
   columns: [
     { key: "LIEU D'ENROLEMENT", required: false, type: 'string', maxLength: 255 },
@@ -544,7 +545,7 @@ class CarteImportExportService {
   }
 
   // ============================================
-  // IMPORTATION INTELLIGENTE (SMART SYNC) - NOUVEAU
+  // IMPORTATION INTELLIGENTE (SMART SYNC)
   // ============================================
   static async importSmartSync(req, res) {
     console.time('⏱️ Import Smart Sync');
@@ -816,7 +817,7 @@ class CarteImportExportService {
   }
 
   // ============================================
-  // EXPORT STREAMING (OPTIMISÉ POUR RENDER GRATUIT) - NOUVEAU
+  // EXPORT STREAMING OPTIMISÉ
   // ============================================
   static async exportStream(req, res) {
     console.time('⏱️ Export Streaming');
@@ -921,7 +922,179 @@ class CarteImportExportService {
   }
 
   // ============================================
-  // EXPORT FILTRÉ - NOUVEAU
+  // EXPORT OPTIMISÉ AVEC PAGINATION
+  // ============================================
+  static async exportOptimized(req, res) {
+    console.time('⏱️ Export Optimisé');
+    console.log('🚀 DEBUT EXPORT OPTIMISÉ POUR GROS VOLUMES');
+    
+    try {
+      const { 
+        page = 1, 
+        pageSize = 5000,
+        filters = '{}',
+        format = 'xlsx'
+      } = req.query;
+      
+      const parsedFilters = JSON.parse(filters);
+      const streamId = `export_opt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      db.registerExportStream && db.registerExportStream(streamId);
+      
+      // Calculer le nombre total de lignes
+      const countQuery = this.buildCountQuery(parsedFilters);
+      const countResult = await db.query(countQuery.query, countQuery.params);
+      const totalRows = parseInt(countResult.rows[0].count);
+      
+      console.log(`📊 Export optimisé: ${totalRows} lignes trouvées`);
+      
+      if (totalRows > 50000 && CONFIG.renderFreeTier) {
+        console.warn('⚠️ Gros volume détecté, utilisation du streaming paginé');
+        return this.exportPaginatedStream(req, res, parsedFilters, totalRows);
+      }
+      
+      // Pour les volumes moyens, utiliser le streaming direct
+      return this.exportStream(req, res);
+      
+    } catch (error) {
+      console.error('❌ Erreur export optimisé:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Erreur lors de l\'export optimisé: ' + error.message
+      });
+    }
+  }
+
+  // ============================================
+  // EXPORT PAGINÉ POUR TRÈS GROS VOLUMES
+  // ============================================
+  static async exportPaginatedStream(req, res, filters, totalRows) {
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      stream: res,
+      useStyles: false, // Désactiver les styles pour économiser la mémoire
+      useSharedStrings: false
+    });
+    
+    const worksheet = workbook.addWorksheet('Cartes');
+    
+    // En-têtes
+    const headerRow = worksheet.addRow(CONFIG.columns.map(col => col.key));
+    headerRow.font = { bold: true };
+    headerRow.commit();
+    
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="cartes-export-pagine.xlsx"');
+    
+    const pageSize = 2000;
+    const totalPages = Math.ceil(totalRows / pageSize);
+    
+    console.log(`📄 Export paginé: ${totalRows} lignes en ${totalPages} pages`);
+    
+    for (let page = 1; page <= totalPages; page++) {
+      const offset = (page - 1) * pageSize;
+      
+      const query = this.buildExportQuery(filters, pageSize, offset);
+      const result = await db.query(query.text, query.params);
+      
+      // Ajouter les lignes au stream
+      result.rows.forEach(row => {
+        const rowData = CONFIG.columns.map(column => 
+          this.getSafeValue(row, column.key) || ''
+        );
+        worksheet.addRow(rowData).commit();
+      });
+      
+      console.log(`📄 Page ${page}/${totalPages} traitée (${result.rows.length} lignes)`);
+      
+      // Pause pour GC
+      if (CONFIG.renderFreeTier && page % 5 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        if (global.gc) global.gc();
+      }
+    }
+    
+    worksheet.commit();
+    await workbook.commit();
+    
+    console.timeEnd('⏱️ Export Optimisé');
+  }
+
+  // ============================================
+  // CONSTRUIRE LES REQUÊTES D'EXPORT
+  // ============================================
+  static buildExportQuery(filters, limit, offset) {
+    let query = 'SELECT * FROM cartes WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    // Appliquer les filtres
+    if (filters.sites && filters.sites.length > 0) {
+      const placeholders = filters.sites.map((_, i) => `$${paramIndex + i}`).join(', ');
+      query += ` AND "SITE DE RETRAIT" IN (${placeholders})`;
+      params.push(...filters.sites);
+      paramIndex += filters.sites.length;
+    }
+    
+    if (filters.dateFrom) {
+      query += ` AND "DATE DE DELIVRANCE" >= $${paramIndex}`;
+      params.push(filters.dateFrom);
+      paramIndex++;
+    }
+    
+    if (filters.dateTo) {
+      query += ` AND "DATE DE DELIVRANCE" <= $${paramIndex}`;
+      params.push(filters.dateTo);
+      paramIndex++;
+    }
+    
+    if (filters.nom) {
+      query += ` AND nom ILIKE $${paramIndex}`;
+      params.push(`%${filters.nom}%`);
+      paramIndex++;
+    }
+    
+    query += ` ORDER BY id LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+    
+    return { text: query, params };
+  }
+
+  static buildCountQuery(filters) {
+    let query = 'SELECT COUNT(*) as count FROM cartes WHERE 1=1';
+    const params = [];
+    let paramIndex = 1;
+    
+    // Mêmes filtres que buildExportQuery
+    if (filters.sites && filters.sites.length > 0) {
+      const placeholders = filters.sites.map((_, i) => `$${paramIndex + i}`).join(', ');
+      query += ` AND "SITE DE RETRAIT" IN (${placeholders})`;
+      params.push(...filters.sites);
+      paramIndex += filters.sites.length;
+    }
+    
+    if (filters.dateFrom) {
+      query += ` AND "DATE DE DELIVRANCE" >= $${paramIndex}`;
+      params.push(filters.dateFrom);
+      paramIndex++;
+    }
+    
+    if (filters.dateTo) {
+      query += ` AND "DATE DE DELIVRANCE" <= $${paramIndex}`;
+      params.push(filters.dateTo);
+      paramIndex++;
+    }
+    
+    if (filters.nom) {
+      query += ` AND nom ILIKE $${paramIndex}`;
+      params.push(`%${filters.nom}%`);
+      paramIndex++;
+    }
+    
+    return { query, params };
+  }
+
+  // ============================================
+  // EXPORT FILTRÉ
   // ============================================
   static async exportFiltered(req, res) {
     try {
@@ -1046,7 +1219,7 @@ class CarteImportExportService {
   }
 
   // ============================================
-  // LISTE DES SITES - NOUVEAU
+  // LISTE DES SITES
   // ============================================
   static async getSitesList(req, res) {
     try {
@@ -1072,7 +1245,7 @@ class CarteImportExportService {
   }
 
   // ============================================
-  // STATISTIQUES IMPORT - NOUVEAU
+  // STATISTIQUES IMPORT
   // ============================================
   static async getImportStats(req, res) {
     try {
@@ -1423,6 +1596,8 @@ module.exports = {
   importFiltered: CarteImportExportService.importExcel.bind(CarteImportExportService),
   exportExcel: CarteImportExportService.exportAll.bind(CarteImportExportService),
   exportStream: CarteImportExportService.exportStream.bind(CarteImportExportService),
+  exportOptimized: CarteImportExportService.exportOptimized.bind(CarteImportExportService),
+  exportPaginatedStream: CarteImportExportService.exportPaginatedStream.bind(CarteImportExportService),
   exportFiltered: CarteImportExportService.exportFiltered.bind(CarteImportExportService),
   exportResultats: CarteImportExportService.exportSearchResults.bind(CarteImportExportService),
   downloadTemplate: CarteImportExportService.downloadTemplate.bind(CarteImportExportService),
