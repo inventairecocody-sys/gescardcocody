@@ -207,8 +207,10 @@ const corsOptions = {
     'X-Request-ID',
     'X-File-Size',
     'X-Import-Batch-ID',
-    'x-environment', // AJOUT IMPORTANT - en minuscules
-    'X-Environment'  // AJOUT IMPORTANT - en majuscules
+    'x-environment',
+    'X-Environment',
+    'x-request-type', // CORRECTION : AJOUT DE CET EN-TÊTE
+    'X-Request-Type'  // CORRECTION : VERSION MAJUSCULES AUSSI
   ],
   exposedHeaders: [
     'Content-Range',
@@ -217,7 +219,7 @@ const corsOptions = {
     'X-Request-ID',
     'X-Import-Progress',
     'X-Import-Batch-ID',
-    'X-Environment'  // AJOUT SI BESOIN D'EXPOSER CET EN-TÊTE
+    'X-Environment'
   ],
   maxAge: 86400,
   preflightContinue: false,
