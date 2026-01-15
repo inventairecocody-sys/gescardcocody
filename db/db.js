@@ -194,6 +194,123 @@ const queryStream = async (text, params, batchSize = 1000) => {
   return streamIterator;
 };
 
+// 🔄 VERSION STREAMING OPTIMISÉE POUR RENDER GRATUIT
+const queryStreamOptimized = async (text, params, batchSize = 500) => {
+  console.log('🚀 Début queryStreamOptimized pour Render gratuit');
+  
+  const client = await pool.connect();
+  
+  // Configuration adaptative pour Render gratuit
+  const optimizedBatchSize = isRenderFreeTier ? Math.min(batchSize, 250) : batchSize;
+  const pauseBetweenBatches = isRenderFreeTier ? 200 : 100;
+  
+  console.log(`⚙️ Configuration streaming optimisée: batch=${optimizedBatchSize}, pause=${pauseBetweenBatches}ms`);
+  
+  let offset = 0;
+  let hasMore = true;
+  let batchCount = 0;
+  const streamId = `stream_opt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  registerExportStream(streamId);
+  
+  const streamIterator = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          if (!hasMore) {
+            unregisterExportStream(streamId);
+            client.release();
+            
+            // Libération mémoire sur Render gratuit
+            if (isRenderFreeTier && global.gc) {
+              try {
+                global.gc();
+              } catch (error) {
+                // Ignorer les erreurs de GC
+              }
+            }
+            
+            return { done: true };
+          }
+          
+          try {
+            batchCount++;
+            
+            // Construction de la requête avec optimisation
+            let batchQuery = text;
+            if (!text.includes('LIMIT') && !text.includes('limit')) {
+              batchQuery += ` LIMIT ${optimizedBatchSize} OFFSET ${offset}`;
+            } else {
+              batchQuery = batchQuery.replace(/LIMIT \d+/i, `LIMIT ${optimizedBatchSize}`);
+              if (!batchQuery.includes('OFFSET')) {
+                batchQuery += ` OFFSET ${offset}`;
+              } else {
+                batchQuery = batchQuery.replace(/OFFSET \d+/i, `OFFSET ${offset}`);
+              }
+            }
+            
+            const result = await client.query(batchQuery, params);
+            
+            if (result.rows.length === 0) {
+              hasMore = false;
+              unregisterExportStream(streamId);
+              client.release();
+              return { done: true };
+            }
+            
+            offset += optimizedBatchSize;
+            
+            // Log de progression (moins fréquent sur Render)
+            if (batchCount % (isRenderFreeTier ? 10 : 5) === 0) {
+              const memory = process.memoryUsage();
+              console.log(`📦 Stream batch ${batchCount}: ${result.rows.length} lignes, offset: ${offset}, mémoire: ${Math.round(memory.heapUsed / 1024 / 1024)}MB`);
+            }
+            
+            // Pause stratégique pour GC et éviter les timeouts
+            if (isRenderFreeTier && batchCount % 5 === 0) {
+              await new Promise(resolve => setTimeout(resolve, pauseBetweenBatches));
+              
+              // Forcer le garbage collection périodiquement
+              if (batchCount % 20 === 0 && global.gc) {
+                try {
+                  global.gc();
+                  console.log(`🧹 GC forcé après batch ${batchCount}`);
+                } catch (error) {
+                  // Ignorer les erreurs de GC
+                }
+              }
+            }
+            
+            return {
+              done: false,
+              value: result.rows
+            };
+          } catch (error) {
+            unregisterExportStream(streamId);
+            client.release();
+            
+            console.error(`❌ Erreur queryStreamOptimized batch ${batchCount}:`, error.message);
+            
+            // Gestion spéciale pour les timeouts Render
+            if (error.code === '57014' || error.message.includes('timeout') || error.message.includes('cancelled')) {
+              console.warn('⚠️ Timeout détecté, tentative de reprise avec batch plus petit');
+              
+              // Réessayer avec un batch plus petit
+              if (optimizedBatchSize > 50) {
+                console.log(`🔄 Réduction batch size: ${optimizedBatchSize} → ${Math.floor(optimizedBatchSize / 2)}`);
+                return queryStreamOptimized(text, params, Math.floor(optimizedBatchSize / 2));
+              }
+            }
+            
+            throw error;
+          }
+        }
+      };
+    }
+  };
+  
+  return streamIterator;
+};
+
 // Obtenir un client avec gestion d'erreur améliorée
 const getClient = async () => {
   try {
@@ -293,7 +410,8 @@ setTimeout(() => {
 
 module.exports = {
   query,
-  queryStream, // ✅ NOUVEAU: pour les exports streaming
+  queryStream,
+  queryStreamOptimized, // ✅ AJOUTÉ : méthode manquante
   getClient,
   getPoolStats,
   registerExportStream,

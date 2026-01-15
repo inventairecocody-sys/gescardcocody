@@ -8,21 +8,25 @@ class BulkImportController {
     // Stocker les imports actifs
     this.activeImports = new Map();
     
-    // Configuration
-    this.maxConcurrentImports = 2; // Limite sur Render gratuit
-    this.importTimeout = 30 * 60 * 1000; // 30 minutes max
-    this.cleanupInterval = 5 * 60 * 1000; // Nettoyer toutes les 5 minutes
+    // CONFIGURATION OPTIMISÉE POUR RENDER GRATUIT
+    this.isRenderFreeTier = process.env.NODE_ENV === 'production' && !process.env.RENDER_PAID_TIER;
+    
+    this.maxConcurrentImports = this.isRenderFreeTier ? 1 : 2; // 1 seul import simultané sur Render gratuit
+    this.importTimeout = this.isRenderFreeTier ? 25 * 60 * 1000 : 30 * 60 * 1000; // 25 min max sur Render gratuit (prévenir le timeout 30s)
+    this.cleanupInterval = 10 * 60 * 1000; // Nettoyer toutes les 10 minutes
     
     // Démarrer le nettoyage périodique
     this.startCleanupInterval();
     
-    console.log('🚀 BulkImportController initialisé');
+    console.log(`🚀 BulkImportController initialisé (Render gratuit: ${this.isRenderFreeTier})`);
   }
 
   /**
-   * Lancer un import massif
+   * Lancer un import massif - OPTIMISÉ POUR RENDER
    */
   async startBulkImport(req, res) {
+    console.time('⏱️ Bulk Import Request');
+    
     // Vérifier l'authentification
     if (!req.user) {
       return res.status(401).json({
@@ -39,13 +43,28 @@ class BulkImportController {
       });
     }
 
+    // VÉRIFIER LA TAILLE DU FICHIER POUR RENDER GRATUIT
+    if (this.isRenderFreeTier && req.file.size > 30 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        error: 'Fichier trop volumineux pour Render gratuit',
+        message: 'La taille maximale est de 30MB sur Render gratuit',
+        maxSize: '30MB',
+        advice: 'Divisez votre fichier en plusieurs parties de moins de 5000 lignes'
+      });
+    }
+
     // Vérifier le nombre d'imports concurrents
-    if (this.getActiveImportCount() >= this.maxConcurrentImports) {
+    const activeCount = this.getActiveImportCount();
+    if (activeCount >= this.maxConcurrentImports) {
       return res.status(429).json({
         success: false,
         error: 'Trop d\'imports en cours',
-        message: `Maximum ${this.maxConcurrentImports} imports simultanés autorisés`,
-        queuePosition: this.getActiveImportCount() + 1
+        message: this.isRenderFreeTier 
+          ? 'Un seul import simultané autorisé sur Render gratuit' 
+          : `Maximum ${this.maxConcurrentImports} imports simultanés autorisés`,
+        queuePosition: activeCount + 1,
+        waitTime: this.estimateWaitTime(activeCount)
       });
     }
 
@@ -62,10 +81,11 @@ class BulkImportController {
         actionType: 'START_BULK_IMPORT',
         tableName: 'Cartes',
         importBatchID: importId,
-        details: `Début import massif: ${req.file.originalname} (${req.file.size} bytes)`
+        details: `Début import massif: ${req.file.originalname} (${req.file.size} bytes) sur ${this.isRenderFreeTier ? 'Render gratuit' : 'serveur normal'}`
       });
 
-      // Répondre immédiatement avec l'ID d'import
+      // Répondre IMMÉDIATEMENT (dans les 30 secondes Render)
+      console.timeEnd('⏱️ Bulk Import Request');
       res.json({
         success: true,
         message: 'Import démarré en arrière-plan',
@@ -74,7 +94,13 @@ class BulkImportController {
         cancelUrl: `/api/import-export/bulk-import/cancel/${importId}`,
         estimatedTime: this.estimateProcessingTime(req.file.size),
         user: req.user.NomUtilisateur,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        warnings: this.isRenderFreeTier ? [
+          '⚠️ Render gratuit - limites strictes appliquées',
+          '⏱️ Timeout max: 25 minutes',
+          '📁 Taille max: 30MB',
+          '🔢 1 import simultané seulement'
+        ] : []
       });
 
       // Lancer le traitement en arrière-plan
@@ -95,16 +121,19 @@ class BulkImportController {
   }
 
   /**
-   * Traiter l'import en arrière-plan
+   * Traiter l'import en arrière-plan - OPTIMISÉ POUR RENDER
    */
   async processImportBackground(importId, file, user) {
-    console.log(`🎯 Démarrage import ${importId} pour ${user.NomUtilisateur}`);
+    console.log(`🎯 Démarrage import ${importId} pour ${user.NomUtilisateur} (${this.isRenderFreeTier ? 'Render gratuit' : 'serveur normal'})`);
     
-    // Créer le service d'import
+    // Créer le service d'import avec configuration adaptative
     const importService = new BulkImportService({
-      batchSize: user.Role === 'Administrateur' ? 1000 : 500,
-      maxConcurrentBatches: user.Role === 'Administrateur' ? 3 : 2,
-      memoryLimitMB: 150
+      batchSize: this.isRenderFreeTier ? 500 : (user.Role === 'Administrateur' ? 1000 : 500),
+      maxConcurrentBatches: this.isRenderFreeTier ? 1 : (user.Role === 'Administrateur' ? 3 : 2),
+      memoryLimitMB: this.isRenderFreeTier ? 100 : 150,
+      timeoutMinutes: this.isRenderFreeTier ? 25 : 30, // Prévenir timeout 30s Render
+      pauseBetweenBatches: this.isRenderFreeTier ? 200 : 100, // Pauses plus longues sur Render
+      enableMemoryCleanup: this.isRenderFreeTier
     });
 
     // Stocker les informations de l'import
@@ -122,7 +151,9 @@ class BulkImportController {
       progress: 0,
       stats: null,
       service: importService,
-      lastUpdate: new Date()
+      lastUpdate: new Date(),
+      environment: this.isRenderFreeTier ? 'render-free' : 'normal',
+      timeoutAt: new Date(Date.now() + this.importTimeout)
     };
 
     this.activeImports.set(importId, importInfo);
@@ -131,17 +162,28 @@ class BulkImportController {
       // Configurer les écouteurs d'événements
       this.setupServiceListeners(importService, importId, user);
 
-      // Lancer l'import
+      // Lancer l'import avec timeout
       importInfo.status = 'processing';
       this.updateImportInfo(importId, { status: 'processing' });
 
-      const result = await importService.importLargeExcelFile(file.path, user.id, importId);
+      // Ajouter un timeout pour prévenir le problème Render
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`Import timeout après ${this.isRenderFreeTier ? '25' : '30'} minutes (limite Render)`));
+        }, this.importTimeout);
+      });
+
+      const result = await Promise.race([
+        importService.importLargeExcelFile(file.path, user.id, importId),
+        timeoutPromise
+      ]);
 
       // Mettre à jour les informations
       importInfo.status = 'completed';
       importInfo.stats = result.stats;
       importInfo.endTime = new Date();
       importInfo.result = result;
+      importInfo.timeoutAt = null;
       this.updateImportInfo(importId, importInfo);
 
       // Journaliser la réussite
@@ -151,17 +193,18 @@ class BulkImportController {
         actionType: 'COMPLETE_BULK_IMPORT',
         tableName: 'Cartes',
         importBatchID: importId,
-        details: `Import massif terminé avec succès: ${result.stats.imported} importés, ${result.stats.updated} mis à jour, ${result.stats.errors} erreurs en ${Math.round(result.duration / 1000)}s`
+        details: `Import massif terminé avec succès sur ${this.isRenderFreeTier ? 'Render gratuit' : 'serveur normal'}: ${result.stats.imported} importés, ${result.stats.updated} mis à jour, ${result.stats.errors} erreurs en ${Math.round(result.duration / 1000)}s`
       });
 
-      console.log(`✅ Import ${importId} terminé avec succès`);
+      console.log(`✅ Import ${importId} terminé avec succès (${Math.round(result.duration / 1000)}s)`);
 
     } catch (error) {
-      console.error(`❌ Erreur import ${importId}:`, error);
+      console.error(`❌ Erreur import ${importId}:`, error.message);
       
       importInfo.status = 'error';
       importInfo.error = error.message;
       importInfo.endTime = new Date();
+      importInfo.timeoutAt = null;
       this.updateImportInfo(importId, importInfo);
 
       // Journaliser l'erreur
@@ -171,7 +214,7 @@ class BulkImportController {
         actionType: 'ERROR_BULK_IMPORT',
         tableName: 'Cartes',
         importBatchID: importId,
-        details: `Erreur import massif: ${error.message}`
+        details: `Erreur import massif sur ${this.isRenderFreeTier ? 'Render gratuit' : 'serveur normal'}: ${error.message}`
       });
 
     } finally {
@@ -183,6 +226,12 @@ class BulkImportController {
       
       // Marquer comme terminé
       importInfo.lastUpdate = new Date();
+      
+      // Libérer la mémoire
+      if (global.gc && this.isRenderFreeTier) {
+        global.gc();
+        console.log(`🧹 GC forcé après import ${importId}`);
+      }
     }
   }
 
@@ -213,15 +262,22 @@ class BulkImportController {
         processedRows: data.processed,
         currentBatch: data.currentBatch
       });
+      
+      // Log de progression moins fréquent sur Render gratuit
+      if (!this.isRenderFreeTier || data.currentBatch % 10 === 0) {
+        console.log(`📈 Import ${importId}: ${data.percentage}% (${data.processed}/${data.total})`);
+      }
     });
 
     service.on('batchStart', (data) => {
-      console.log(`📦 Import ${importId} - Batch ${data.batchIndex} démarré (${data.size} lignes)`);
+      if (!this.isRenderFreeTier || data.batchIndex % 5 === 0) {
+        console.log(`📦 Import ${importId} - Batch ${data.batchIndex} démarré (${data.size} lignes)`);
+      }
     });
 
     service.on('batchComplete', (data) => {
       // Mettre à jour périodiquement, pas à chaque batch
-      if (data.batchIndex % 5 === 0) {
+      if (data.batchIndex % (this.isRenderFreeTier ? 10 : 5) === 0) {
         this.updateImportInfo(importId, {
           lastBatch: data.batchIndex,
           batchResults: data.results,
@@ -247,7 +303,7 @@ class BulkImportController {
   }
 
   /**
-   * Obtenir le statut d'un import
+   * Obtenir le statut d'un import - OPTIMISÉ POUR RENDER
    */
   getImportStatus(req, res) {
     const { importId } = req.params;
@@ -257,9 +313,14 @@ class BulkImportController {
       return res.status(404).json({
         success: false,
         error: 'Import non trouvé',
-        message: 'L\'import a peut-être été terminé ou supprimé'
+        message: 'L\'import a peut-être été terminé ou supprimé',
+        advice: 'Les imports sont nettoyés automatiquement après 1 heure'
       });
     }
+
+    // VÉRIFIER SI L'IMPORT APPROCHE DU TIMEOUT RENDER
+    const timeRemaining = importInfo.timeoutAt ? importInfo.timeoutAt.getTime() - Date.now() : null;
+    const isNearTimeout = timeRemaining && timeRemaining < 5 * 60 * 1000; // Moins de 5 minutes
 
     // Obtenir les stats en temps réel du service
     let serviceStatus = null;
@@ -286,15 +347,36 @@ class BulkImportController {
           importInfo.endTime - importInfo.startTime :
           Date.now() - importInfo.startTime.getTime(),
         lastUpdate: importInfo.lastUpdate,
-        error: importInfo.error
+        error: importInfo.error,
+        environment: importInfo.environment,
+        warnings: []
+      },
+      system: {
+        environment: this.isRenderFreeTier ? 'render-free' : 'normal',
+        activeImports: this.getActiveImportCount(),
+        maxConcurrent: this.maxConcurrentImports,
+        memory: process.memoryUsage()
       }
     };
+
+    // Ajouter des warnings si nécessaire
+    if (this.isRenderFreeTier) {
+      response.import.warnings.push('⚠️ Render gratuit - limitations actives');
+      
+      if (isNearTimeout) {
+        response.import.warnings.push(`⏰ Timeout dans ${Math.round(timeRemaining / 1000 / 60)} minutes`);
+      }
+      
+      if (importInfo.status === 'processing' && response.import.progress < 10 && response.import.duration > 60000) {
+        response.import.warnings.push('🐌 Progression lente - considérez annuler et diviser le fichier');
+      }
+    }
 
     res.json(response);
   }
 
   /**
-   * Annuler un import en cours
+   * Annuler un import en cours - OPTIMISÉ POUR RENDER
    */
   async cancelImport(req, res) {
     const { importId } = req.params;
@@ -303,7 +385,10 @@ class BulkImportController {
     if (!importInfo) {
       return res.status(404).json({
         success: false,
-        error: 'Import non trouvé'
+        error: 'Import non trouvé',
+        message: this.isRenderFreeTier ? 
+          'Sur Render gratuit, les imports sont nettoyés rapidement après erreur/timeout' : 
+          'L\'import a peut-être été terminé ou supprimé'
       });
     }
 
@@ -311,7 +396,10 @@ class BulkImportController {
       return res.status(400).json({
         success: false,
         error: 'Import non annulable',
-        currentStatus: importInfo.status
+        currentStatus: importInfo.status,
+        advice: this.isRenderFreeTier ? 
+          'Sur Render gratuit, seul un import peut être actif à la fois' : 
+          undefined
       });
     }
 
@@ -325,6 +413,7 @@ class BulkImportController {
       importInfo.status = 'cancelled';
       importInfo.endTime = new Date();
       importInfo.lastUpdate = new Date();
+      importInfo.timeoutAt = null;
       
       this.activeImports.set(importId, importInfo);
 
@@ -335,14 +424,26 @@ class BulkImportController {
         actionType: 'CANCEL_BULK_IMPORT',
         tableName: 'Cartes',
         importBatchID: importId,
-        details: 'Import massif annulé par l\'utilisateur'
+        details: `Import massif annulé sur ${this.isRenderFreeTier ? 'Render gratuit' : 'serveur normal'}`
       });
+
+      // Libérer la mémoire
+      if (this.isRenderFreeTier && global.gc) {
+        global.gc();
+      }
 
       res.json({
         success: true,
         message: 'Import annulé avec succès',
         importId,
-        cancelledAt: new Date().toISOString()
+        cancelledAt: new Date().toISOString(),
+        environment: this.isRenderFreeTier ? 'render-free' : 'normal',
+        advice: this.isRenderFreeTier ? [
+          'Pour éviter les timeouts sur Render gratuit:',
+          '1. Divisez les fichiers > 5000 lignes',
+          '2. Utilisez des fichiers < 30MB',
+          '3. Importez par lots de 1000-2000 lignes'
+        ] : []
       });
 
     } catch (error) {
@@ -355,7 +456,7 @@ class BulkImportController {
   }
 
   /**
-   * Lister tous les imports actifs/récents
+   * Lister tous les imports actifs/récents - OPTIMISÉ
    */
   listActiveImports(req, res) {
     const imports = Array.from(this.activeImports.values())
@@ -373,7 +474,9 @@ class BulkImportController {
           imp.endTime - imp.startTime :
           Date.now() - imp.startTime.getTime(),
         stats: imp.stats,
-        error: imp.error
+        error: imp.error,
+        environment: imp.environment,
+        isStalled: this.isImportStalled(imp)
       }));
 
     res.json({
@@ -383,12 +486,19 @@ class BulkImportController {
       active: imports.filter(i => ['initializing', 'processing', 'started', 'analyzing'].includes(i.status)).length,
       completed: imports.filter(i => i.status === 'completed').length,
       cancelled: imports.filter(i => i.status === 'cancelled').length,
-      errored: imports.filter(i => i.status === 'error').length
+      errored: imports.filter(i => i.status === 'error').length,
+      stalled: imports.filter(i => this.isImportStalled(i)).length,
+      environment: this.isRenderFreeTier ? 'render-free' : 'normal',
+      limits: {
+        maxConcurrent: this.maxConcurrentImports,
+        maxFileSize: this.isRenderFreeTier ? '30MB' : '50MB',
+        timeout: this.isRenderFreeTier ? '25 minutes' : '30 minutes'
+      }
     });
   }
 
   /**
-   * Obtenir les statistiques des imports
+   * Obtenir les statistiques des imports - OPTIMISÉ
    */
   getImportStats(req, res) {
     const allImports = Array.from(this.activeImports.values());
@@ -401,22 +511,25 @@ class BulkImportController {
       cancelledImports: allImports.filter(i => i.status === 'cancelled').length,
       totalRowsProcessed: allImports.reduce((sum, imp) => sum + (imp.stats?.imported || 0) + (imp.stats?.updated || 0), 0),
       avgProcessingTime: this.calculateAverageProcessingTime(allImports),
-      memoryUsage: this.calculateMemoryUsage(allImports)
+      memoryUsage: this.calculateMemoryUsage(allImports),
+      environment: this.isRenderFreeTier ? 'render-free' : 'normal',
+      performance: this.calculatePerformanceMetrics(allImports)
     };
 
     res.json({
       success: true,
       stats,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      recommendations: this.isRenderFreeTier ? this.getRenderRecommendations(stats) : []
     });
   }
 
   /**
-   * Nettoyer les anciens imports
+   * Nettoyer les anciens imports - OPTIMISÉ POUR RENDER
    */
   cleanupOldImports() {
     const now = Date.now();
-    const cutoffTime = now - (60 * 60 * 1000); // 1 heure
+    const cutoffTime = now - (this.isRenderFreeTier ? 30 * 60 * 1000 : 60 * 60 * 1000); // 30 min sur Render, 1h sinon
     
     let cleanedCount = 0;
     
@@ -435,9 +548,37 @@ class BulkImportController {
     if (cleanedCount > 0) {
       console.log(`🧹 Nettoyage terminé: ${cleanedCount} imports supprimés`);
     }
+    
+    // Vérifier les imports qui bloquent (plus de 30 minutes sans progression)
+    this.checkForStalledImports();
   }
 
-  // ==================== MÉTHODES UTILITAIRES ====================
+  /**
+   * Vérifier les imports bloqués
+   */
+  checkForStalledImports() {
+    const now = Date.now();
+    const stallThreshold = 5 * 60 * 1000; // 5 minutes sans mise à jour
+    
+    for (const [importId, importInfo] of this.activeImports.entries()) {
+      if (['initializing', 'processing', 'started', 'analyzing'].includes(importInfo.status)) {
+        const timeSinceUpdate = now - importInfo.lastUpdate.getTime();
+        
+        if (timeSinceUpdate > stallThreshold) {
+          console.warn(`⚠️ Import ${importId} semble bloqué (pas de mise à jour depuis ${Math.round(timeSinceUpdate / 1000 / 60)} minutes)`);
+          
+          // Marquer comme erreur
+          importInfo.status = 'error';
+          importInfo.error = `Import bloqué - pas de progression depuis ${Math.round(timeSinceUpdate / 1000 / 60)} minutes`;
+          importInfo.endTime = new Date();
+          
+          this.activeImports.set(importId, importInfo);
+        }
+      }
+    }
+  }
+
+  // ==================== MÉTHODES UTILITAIRES OPTIMISÉES ====================
 
   /**
    * Mettre à jour les informations d'un import
@@ -466,17 +607,36 @@ class BulkImportController {
    * Estimer le temps de traitement
    */
   estimateProcessingTime(fileSize) {
-    // Estimation basée sur l'expérience : ~100 lignes/sec sur Render gratuit
+    // Estimation basée sur l'expérience : ~50 lignes/sec sur Render gratuit, ~100 sur serveur normal
+    const rowsPerSecond = this.isRenderFreeTier ? 50 : 100;
     const estimatedRows = Math.ceil(fileSize / 1000); // Estimation approximative
-    const seconds = Math.ceil(estimatedRows / 100);
+    const seconds = Math.ceil(estimatedRows / rowsPerSecond);
     
     if (seconds < 60) {
       return `${seconds} secondes`;
     } else if (seconds < 3600) {
-      return `${Math.ceil(seconds / 60)} minutes`;
+      const minutes = Math.ceil(seconds / 60);
+      return `${minutes} minute${minutes > 1 ? 's' : ''}`;
     } else {
-      return `${Math.ceil(seconds / 3600)} heures`;
+      const hours = Math.ceil(seconds / 3600);
+      return `${hours} heure${hours > 1 ? 's' : ''}`;
     }
+  }
+
+  /**
+   * Estimer le temps d'attente
+   */
+  estimateWaitTime(queuePosition) {
+    // Estimation basée sur la position dans la file
+    const avgImportTime = this.isRenderFreeTier ? 15 : 10; // minutes en moyenne
+    const waitMinutes = avgImportTime * (queuePosition - 1);
+    
+    if (waitMinutes < 1) return 'moins d\'une minute';
+    if (waitMinutes < 60) return `${Math.ceil(waitMinutes)} minutes`;
+    
+    const hours = Math.floor(waitMinutes / 60);
+    const minutes = Math.ceil(waitMinutes % 60);
+    return `${hours}h${minutes > 0 ? `${minutes}min` : ''}`;
   }
 
   /**
@@ -526,6 +686,61 @@ class BulkImportController {
   }
 
   /**
+   * Calculer les métriques de performance
+   */
+  calculatePerformanceMetrics(imports) {
+    const completedImports = imports.filter(i => i.status === 'completed' && i.stats);
+    
+    if (completedImports.length === 0) return null;
+    
+    const totalRows = completedImports.reduce((sum, imp) => sum + (imp.stats.imported || 0) + (imp.stats.updated || 0), 0);
+    const totalTime = completedImports.reduce((sum, imp) => sum + (imp.stats.duration || 0), 0);
+    
+    return {
+      rowsPerSecond: totalTime > 0 ? Math.round(totalRows / (totalTime / 1000)) : 0,
+      avgRowsPerImport: Math.round(totalRows / completedImports.length),
+      successRate: (completedImports.length / imports.length) * 100
+    };
+  }
+
+  /**
+   * Vérifier si un import est bloqué
+   */
+  isImportStalled(importInfo) {
+    if (!['initializing', 'processing', 'started', 'analyzing'].includes(importInfo.status)) {
+      return false;
+    }
+    
+    const timeSinceUpdate = Date.now() - importInfo.lastUpdate.getTime();
+    return timeSinceUpdate > 5 * 60 * 1000; // 5 minutes sans mise à jour
+  }
+
+  /**
+   * Obtenir des recommandations pour Render gratuit
+   */
+  getRenderRecommendations(stats) {
+    const recommendations = [];
+    
+    if (stats.failedImports > stats.successfulImports * 0.5) {
+      recommendations.push('🔴 Taux d\'échec élevé - vérifiez la taille des fichiers');
+    }
+    
+    if (stats.memoryUsage.avgMB > 80) {
+      recommendations.push('⚠️ Utilisation mémoire élevée - divisez les fichiers');
+    }
+    
+    if (stats.avgProcessingTime > 1200) { // > 20 minutes
+      recommendations.push('🐌 Temps de traitement long - réduisez les lots à 1000 lignes');
+    }
+    
+    if (recommendations.length === 0) {
+      recommendations.push('✅ Performance acceptable pour Render gratuit');
+    }
+    
+    return recommendations;
+  }
+
+  /**
    * Démarrer l'intervalle de nettoyage
    */
   startCleanupInterval() {
@@ -533,7 +748,7 @@ class BulkImportController {
       this.cleanupOldImports();
     }, this.cleanupInterval);
     
-    console.log(`🧹 Nettoyage périodique configuré: ${this.cleanupInterval / 1000}s`);
+    console.log(`🧹 Nettoyage périodique configuré: ${this.cleanupInterval / 1000}s (Render gratuit: ${this.isRenderFreeTier})`);
   }
 }
 
