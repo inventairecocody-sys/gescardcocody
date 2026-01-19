@@ -209,17 +209,22 @@ const corsOptions = {
     'X-Import-Batch-ID',
     'x-environment',
     'X-Environment',
-    'x-request-type', // CORRECTION : AJOUT DE CET EN-TÊTE
-    'X-Request-Type'  // CORRECTION : VERSION MAJUSCULES AUSSI
+    'x-request-type',
+    'X-Request-Type',
+    'x-file-type',     // CORRECTION : AJOUT POUR L'IMPORT CSV
+    'X-File-Type'      // CORRECTION : VERSION MAJUSCULE AUSSI
   ],
   exposedHeaders: [
     'Content-Range',
     'X-Content-Range',
-    'Content-Disposition',
+    'Content-Disposition',  // IMPORTANT pour les téléchargements
     'X-Request-ID',
     'X-Import-Progress',
     'X-Import-Batch-ID',
-    'X-Environment'
+    'X-Environment',
+    'Content-Type',
+    'Content-Length',
+    'Filename'  // Ajouté pour les téléchargements
   ],
   maxAge: 86400,
   preflightContinue: false,
@@ -228,6 +233,44 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+// Middleware pour forcer le téléchargement des exports
+app.use((req, res, next) => {
+  // Si c'est une route d'export, ajouter des headers pour forcer le téléchargement
+  if (req.path.includes('/api/import-export/export')) {
+    // Intercepter la réponse pour ajouter les headers nécessaires
+    const originalSend = res.send;
+    const originalJson = res.json;
+    
+    res.send = function(body) {
+      // Pour les exports Excel
+      if (req.path.includes('/export') && !req.path.includes('/export/csv')) {
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename="inventaire_cartes.xlsx"');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+      }
+      // Pour les exports CSV
+      else if (req.path.includes('/export/csv')) {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="inventaire_cartes.csv"');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+      }
+      
+      return originalSend.call(this, body);
+    };
+    
+    res.json = function(body) {
+      // Si c'est un export, on ne devrait pas utiliser res.json mais res.send
+      // Cette partie est pour sécurité
+      if (req.path.includes('/export')) {
+        console.warn(`⚠️ Export route using res.json instead of res.send: ${req.path}`);
+      }
+      return originalJson.call(this, body);
+    };
+  }
+  
+  next();
+});
 
 // ========== TIMEOUTS ADAPTATIFS POUR IMPORTS/EXPORTS ==========
 
