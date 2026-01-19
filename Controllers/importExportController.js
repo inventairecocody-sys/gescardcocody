@@ -7,7 +7,7 @@ const csv = require('csv-parser');
 const journalController = require('./journalController');
 
 // ============================================
-// CONFIGURATION GLOBALE
+// CONFIGURATION GLOBALE OPTIMISÉE POUR RENDER GRATUIT
 // ============================================
 const CONFIG = {
   // Formats supportés
@@ -33,299 +33,443 @@ const CONFIG = {
   requiredHeaders: ['NOM', 'PRENOMS'],
   isRenderFreeTier: process.env.NODE_ENV === 'production',
   
-  // Limites
-  maxExportRows: 10000,
-  maxImportRows: 50000
+  // ✅ LIMITES OPTIMISÉES POUR RENDER GRATUIT
+  maxExportRows: 5000, // Réduit de 10000 à 5000 pour éviter les timeouts
+  maxImportRows: 10000,
+  
+  // ✅ TIMEOUTS OPTIMISÉS
+  exportTimeout: 90000, // 90 secondes (Render gratuit a des limites)
+  chunkSize: 1000, // Taille des chunks pour le streaming
+  memoryLimitMB: 100 // Limite mémoire
 };
 
 // ============================================
-// SERVICE IMPORT CSV SIMPLE (SANS BulkImportServiceCSV)
+// CONTROLEUR PRINCIPAL OPTIMISÉ
 // ============================================
-class SimpleCSVImportService {
+class OptimizedImportExportController {
   constructor() {
-    this.activeImports = new Map();
-    this.listeners = new Map();
-    console.log('📥 Service CSV simple initialisé');
+    this.activeExports = new Map();
+    console.log('🚀 Contrôleur Import/Export optimisé pour Render gratuit');
   }
-
-  // Émettre un événement
-  emit(event, data) {
-    const callbacks = this.listeners.get(event) || [];
-    callbacks.forEach(callback => callback(data));
-  }
-
-  // Écouter un événement
-  on(event, callback) {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, []);
-    }
-    this.listeners.get(event).push(callback);
-    return this;
-  }
-
-  // Importer un fichier CSV
-  async importLargeCSVFile(filePath, userId, importBatchId) {
-    console.log(`📥 Import CSV avancé: ${path.basename(filePath)}`);
-    
-    // Émettre l'événement de début
-    this.emit('start', {
-      filePath: path.basename(filePath),
-      startTime: new Date(),
-      importBatchId,
-      userId,
-      environment: CONFIG.isRenderFreeTier ? 'render-free' : 'normal',
-      format: 'CSV'
-    });
-
-    try {
-      // Analyser le fichier CSV
-      const stats = await fs.promises.stat(filePath);
-      const fileSizeMB = stats.size / 1024 / 1024;
-      
-      // Lire et traiter le CSV
-      const result = await this.processCSVFile(filePath, importBatchId, userId);
-      
-      // Émettre l'événement de complétion
-      this.emit('complete', {
-        stats: result.stats,
-        duration: result.duration,
-        importBatchId,
-        environment: CONFIG.isRenderFreeTier ? 'render-free' : 'normal',
-        format: 'CSV'
-      });
-
-      return {
-        success: true,
-        importBatchId,
-        stats: result.stats,
-        duration: result.duration
-      };
-      
-    } catch (error) {
-      console.error('❌ Erreur import CSV avancé:', error);
-      
-      this.emit('error', {
-        error: error.message,
-        importBatchId,
-        duration: 0,
-        format: 'CSV'
-      });
-      
-      throw error;
-    }
-  }
-
-  // Traiter un fichier CSV
-  async processCSVFile(filePath, importBatchId, userId) {
+  
+  // ============================================
+  // EXPORT EXCEL OPTIMISÉ (CORRIGÉ)
+  // ============================================
+  async exportExcel(req, res) {
+    const exportId = `excel_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const startTime = Date.now();
     
-    return new Promise((resolve, reject) => {
-      const rows = [];
-      let lineCount = 0;
+    console.log(`📤 Export Excel demandé (ID: ${exportId})`);
+    
+    // Vérifier les paramètres de test
+    const isTest = req.query.test === 'true' || req.query.limit === '5';
+    const limit = isTest ? 5 : CONFIG.maxExportRows;
+    
+    let client;
+    
+    try {
+      await journalController.logAction({
+        utilisateurId: req.user.id,
+        actionType: 'DEBUT_EXPORT_EXCEL',
+        tableName: 'Cartes',
+        details: `Export Excel démarré ${isTest ? '(TEST)' : ''}`
+      });
       
-      fs.createReadStream(filePath)
-        .pipe(csv({
-          separator: CONFIG.csvDelimiter,
-          mapHeaders: ({ header }) => header.trim().toUpperCase(),
-          mapValues: ({ value }) => value ? value.toString().trim() : ''
-        }))
-        .on('data', (data) => {
-          rows.push(data);
-          lineCount++;
-          
-          // Émettre progression
-          if (lineCount % 1000 === 0) {
-            this.emit('progress', {
-              processed: lineCount,
-              percentage: Math.round((lineCount / 10000) * 100), // Estimation
-              currentBatch: Math.floor(lineCount / 1000),
-              memory: this.getMemoryUsage()
-            });
-          }
-        })
-        .on('end', async () => {
-          console.log(`✅ CSV analysé: ${lineCount} lignes`);
-          
-          try {
-            const client = await db.getClient();
-            await client.query('BEGIN');
-            
-            let imported = 0;
-            let errors = 0;
-            
-            // Traiter par lots de 500
-            for (let i = 0; i < rows.length; i += 500) {
-              const batch = rows.slice(i, i + 500);
-              const batchResult = await this.processBatch(client, batch, importBatchId);
-              
-              imported += batchResult.imported;
-              errors += batchResult.errors;
-              
-              // Émettre progression batch
-              this.emit('batchComplete', {
-                batchIndex: Math.floor(i / 500),
-                results: batchResult,
-                duration: Date.now() - startTime
-              });
-            }
-            
-            await client.query('COMMIT');
-            client.release();
-            
-            const duration = Date.now() - startTime;
-            
-            resolve({
-              stats: {
-                totalRows: lineCount,
-                imported,
-                errors,
-                successRate: lineCount > 0 ? Math.round((imported / lineCount) * 100) : 0
-              },
-              duration
-            });
-            
-          } catch (error) {
-            reject(error);
-          }
-        })
-        .on('error', reject);
-    });
-  }
-
-  // Traiter un lot de données
-  async processBatch(client, batch, importBatchId) {
-    const result = {
-      imported: 0,
-      errors: 0
-    };
-    
-    const queries = [];
-    const values = [];
-    
-    for (const data of batch) {
-      try {
-        // Validation
-        if (!data.NOM || !data.PRENOMS) {
-          result.errors++;
-          continue;
+      client = await db.getClient();
+      
+      // ✅ Récupérer le COUNT d'abord pour estimer la taille
+      const countResult = await client.query('SELECT COUNT(*) as total FROM cartes');
+      const totalRows = parseInt(countResult.rows[0].total);
+      
+      console.log(`📊 ${totalRows} cartes au total, limité à ${limit} pour l'export`);
+      
+      // ✅ VÉRIFICATION DE LA TAILLE
+      if (totalRows > 10000 && !isTest) {
+        console.warn(`⚠️ Gros export détecté: ${totalRows} cartes`);
+        // On continue mais on log un avertissement
+      }
+      
+      // Récupérer les données avec limite
+      const result = await client.query(
+        'SELECT * FROM cartes ORDER BY id LIMIT $1',
+        [limit]
+      );
+      
+      const rows = result.rows;
+      console.log(`📊 ${rows.length} lignes à exporter en Excel`);
+      
+      if (rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'Aucune donnée à exporter'
+        });
+      }
+      
+      // ✅ CRÉER LE WORKBOOK AVEC OPTIMISATION
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'GESCARD Cocody';
+      workbook.created = new Date();
+      
+      const worksheet = workbook.addWorksheet('Cartes');
+      
+      // ✅ AJOUTER LES EN-TÊTES
+      worksheet.columns = CONFIG.csvHeaders.map(header => ({
+        header,
+        key: header.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, ''),
+        width: 20
+      }));
+      
+      // ✅ AJOUTER LES DONNÉES PAR LOTS (évite la mémoire excessive)
+      const batchSize = 500;
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        batch.forEach(row => {
+          worksheet.addRow(row);
+        });
+        
+        // ✅ ÉMULER LA PROGRESSION POUR LE FRONTEND
+        if (i % 1000 === 0) {
+          console.log(`📝 Excel: ${i} lignes ajoutées`);
         }
+      }
+      
+      // ✅ STYLE OPTIMISÉ (léger)
+      const headerRow = worksheet.getRow(1);
+      headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      headerRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF4472C4' }
+      };
+      
+      // ✅ CONFIGURER LA RÉPONSE POUR TÉLÉCHARGEMENT
+      const timestamp = new Date().toISOString().split('T')[0];
+      const time = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
+      const filename = `export-cartes-${timestamp}-${time}.xlsx`;
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('X-Export-ID', exportId);
+      res.setHeader('X-Total-Rows', rows.length);
+      
+      // ✅ ÉCRIRE LE FICHIER EXCEL DIRECTEMENT DANS LA RÉPONSE
+      await workbook.xlsx.write(res);
+      
+      const duration = Date.now() - startTime;
+      
+      await journalController.logAction({
+        utilisateurId: req.user.id,
+        actionType: 'FIN_EXPORT_EXCEL',
+        tableName: 'Cartes',
+        details: `Export Excel terminé: ${rows.length} lignes en ${duration}ms`
+      });
+      
+      console.log(`✅ Export Excel réussi (ID: ${exportId}): ${rows.length} lignes en ${duration}ms`);
+      
+    } catch (error) {
+      console.error(`❌ Erreur export Excel (ID: ${exportId}):`, error);
+      
+      const duration = Date.now() - startTime;
+      
+      // ✅ NE PAS ENVOYER D'ERREUR SI LES EN-TÊTES ONT DÉJÀ ÉTÉ ENVOYÉS
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Erreur lors de l\'export Excel',
+          message: error.message,
+          duration: `${duration}ms`,
+          exportId
+        });
+      } else {
+        // Juste logger l'erreur, on ne peut plus envoyer de réponse
+        console.error('❌ En-têtes déjà envoyés, impossible de renvoyer une erreur');
+      }
+      
+      await journalController.logAction({
+        utilisateurId: req.user.id,
+        actionType: 'ERREUR_EXPORT_EXCEL',
+        tableName: 'Cartes',
+        details: `Erreur export Excel: ${error.message} (${duration}ms)`
+      });
+      
+    } finally {
+      if (client?.release) client.release();
+      
+      // Nettoyer la référence
+      this.activeExports.delete(exportId);
+    }
+  }
+  
+  // ============================================
+  // EXPORT CSV OPTIMISÉ (CORRIGÉ - STREAMING)
+  // ============================================
+  async exportCSV(req, res) {
+    const exportId = `csv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const startTime = Date.now();
+    
+    console.log(`📤 Export CSV demandé (ID: ${exportId})`);
+    
+    // Vérifier les paramètres de test
+    const isTest = req.query.test === 'true' || req.query.limit === '5';
+    const limit = isTest ? 5 : CONFIG.maxExportRows;
+    
+    let client;
+    
+    try {
+      await journalController.logAction({
+        utilisateurId: req.user.id,
+        actionType: 'DEBUT_EXPORT_CSV',
+        tableName: 'Cartes',
+        details: `Export CSV démarré ${isTest ? '(TEST)' : ''}`
+      });
+      
+      client = await db.getClient();
+      
+      // Récupérer le COUNT d'abord
+      const countResult = await client.query('SELECT COUNT(*) as total FROM cartes');
+      const totalRows = parseInt(countResult.rows[0].total);
+      
+      console.log(`📊 ${totalRows} cartes au total, limité à ${limit} pour l'export CSV`);
+      
+      // ✅ CONFIGURER LA RÉPONSE CSV
+      const timestamp = new Date().toISOString().split('T')[0];
+      const time = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
+      const filename = `export-cartes-${timestamp}-${time}.csv`;
+      
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('X-Export-ID', exportId);
+      res.setHeader('X-Total-Rows', Math.min(totalRows, limit));
+      
+      // ✅ ÉCRIRE LES EN-TÊTES CSV
+      const headers = CONFIG.csvHeaders.join(CONFIG.csvDelimiter) + '\n';
+      res.write(headers);
+      
+      // ✅ UTILISER UN CURSEUR POUR LE STREAMING (optimisé pour la mémoire)
+      let offset = 0;
+      const chunkSize = CONFIG.chunkSize;
+      let totalWritten = 0;
+      
+      while (offset < limit) {
+        const currentLimit = Math.min(chunkSize, limit - offset);
         
-        const paramIndex = queries.length * 11 + 1;
-        
-        queries.push(`(
-          $${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, 
-          $${paramIndex + 3}, $${paramIndex + 4}, $${paramIndex + 5},
-          $${paramIndex + 6}, $${paramIndex + 7}, $${paramIndex + 8},
-          $${paramIndex + 9}, $${paramIndex + 10}
-        )`);
-        
-        values.push(
-          data["LIEU D'ENROLEMENT"] || '',
-          data["SITE DE RETRAIT"] || '',
-          data["RANGEMENT"] || '',
-          data["NOM"] || '',
-          data["PRENOMS"] || '',
-          this.formatDate(data["DATE DE NAISSANCE"]),
-          data["LIEU NAISSANCE"] || '',
-          this.formatPhone(data["CONTACT"] || ''),
-          data["DELIVRANCE"] || '',
-          this.formatPhone(data["CONTACT DE RETRAIT"] || ''),
-          this.formatDate(data["DATE DE DELIVRANCE"])
+        const result = await client.query(
+          'SELECT * FROM cartes ORDER BY id LIMIT $1 OFFSET $2',
+          [currentLimit, offset]
         );
         
-        result.imported++;
+        const rows = result.rows;
         
-      } catch (error) {
-        result.errors++;
+        if (rows.length === 0) break;
+        
+        // Écrire les données CSV
+        for (const row of rows) {
+          const csvRow = CONFIG.csvHeaders.map(header => {
+            let value = row[header] || '';
+            
+            // Échapper les caractères spéciaux CSV
+            if (typeof value === 'string') {
+              if (value.includes(CONFIG.csvDelimiter) || value.includes('"') || value.includes('\n')) {
+                value = `"${value.replace(/"/g, '""')}"`;
+              }
+            }
+            
+            // Formater les dates
+            if (header.includes('DATE') && value) {
+              try {
+                const date = new Date(value);
+                if (!isNaN(date.getTime())) {
+                  value = date.toISOString().split('T')[0];
+                }
+              } catch (e) {
+                // Garder la valeur originale en cas d'erreur
+              }
+            }
+            
+            return value;
+          }).join(CONFIG.csvDelimiter);
+          
+          res.write(csvRow + '\n');
+          totalWritten++;
+        }
+        
+        offset += rows.length;
+        
+        // Log de progression
+        if (offset % 5000 === 0) {
+          console.log(`📝 CSV: ${offset} lignes écrites`);
+        }
+        
+        // Petit délai pour éviter de surcharger le serveur Render
+        if (CONFIG.isRenderFreeTier && offset % 10000 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       }
-    }
-    
-    if (queries.length > 0) {
-      const query = `
-        INSERT INTO cartes (
-          "LIEU D'ENROLEMENT", "SITE DE RETRAIT", rangement, nom, prenoms,
-          "DATE DE NAISSANCE", "LIEU NAISSANCE", contact, delivrance,
-          "CONTACT DE RETRAIT", "DATE DE DELIVRANCE", importbatchid
-        ) VALUES ${queries.join(', ')}
-      `;
       
-      await client.query(query, [...values, importBatchId]);
+      res.end();
+      
+      const duration = Date.now() - startTime;
+      const speed = duration > 0 ? Math.round((totalWritten / (duration / 1000))) : 0;
+      
+      await journalController.logAction({
+        utilisateurId: req.user.id,
+        actionType: 'FIN_EXPORT_CSV',
+        tableName: 'Cartes',
+        details: `Export CSV terminé: ${totalWritten} lignes en ${duration}ms (${speed} lignes/sec)`
+      });
+      
+      console.log(`✅ Export CSV réussi (ID: ${exportId}): ${totalWritten} lignes en ${duration}ms (${speed} lignes/sec)`);
+      
+    } catch (error) {
+      console.error(`❌ Erreur export CSV (ID: ${exportId}):`, error);
+      
+      const duration = Date.now() - startTime;
+      
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Erreur lors de l\'export CSV',
+          message: error.message,
+          duration: `${duration}ms`,
+          exportId
+        });
+      } else {
+        console.error('❌ En-têtes déjà envoyés, impossible de renvoyer une erreur CSV');
+        try {
+          res.end(); // Terminer la réponse
+        } catch (e) {
+          // Ignorer les erreurs de fin de réponse
+        }
+      }
+      
+      await journalController.logAction({
+        utilisateurId: req.user.id,
+        actionType: 'ERREUR_EXPORT_CSV',
+        tableName: 'Cartes',
+        details: `Erreur export CSV: ${error.message} (${duration}ms)`
+      });
+      
+    } finally {
+      if (client?.release) client.release();
+      
+      // Nettoyer la référence
+      this.activeExports.delete(exportId);
+    }
+  }
+  
+  // ============================================
+  // EXPORT CSV PAR SITE (OPTIMISÉ)
+  // ============================================
+  async exportCSVBySite(req, res) {
+    const { siteRetrait } = req.query;
+    
+    if (!siteRetrait) {
+      return res.status(400).json({
+        success: false,
+        error: 'Paramètre siteRetrait requis'
+      });
     }
     
-    return result;
-  }
-
-  // Format date
-  formatDate(value) {
-    if (!value) return null;
+    const decodedSite = decodeURIComponent(siteRetrait)
+      .replace(/\+/g, ' ')
+      .trim();
+    
+    console.log(`📤 Export CSV pour site: ${decodedSite}`);
+    
+    let client;
+    
     try {
-      const date = new Date(value);
-      if (isNaN(date.getTime())) return null;
+      client = await db.getClient();
       
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    } catch {
-      return null;
+      // Vérifier existence
+      const siteCheck = await client.query(
+        'SELECT COUNT(*) as count FROM cartes WHERE "SITE DE RETRAIT" = $1',
+        [decodedSite]
+      );
+      
+      const count = parseInt(siteCheck.rows[0].count);
+      
+      if (count === 0) {
+        return res.status(404).json({
+          success: false,
+          error: `Aucune donnée pour le site: ${decodedSite}`
+        });
+      }
+      
+      // Configurer réponse
+      const safeSiteName = decodedSite.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+      const filename = `export-${safeSiteName}.csv`;
+      
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      
+      // Écrire les en-têtes CSV
+      const headers = CONFIG.csvHeaders.join(CONFIG.csvDelimiter) + '\n';
+      res.write(headers);
+      
+      // Utiliser un curseur pour le streaming
+      let offset = 0;
+      const chunkSize = 1000;
+      let totalWritten = 0;
+      
+      while (true) {
+        const result = await client.query(
+          `SELECT * FROM cartes WHERE "SITE DE RETRAIT" = $1 ORDER BY id LIMIT $2 OFFSET $3`,
+          [decodedSite, chunkSize, offset]
+        );
+        
+        const rows = result.rows;
+        if (rows.length === 0) break;
+        
+        // Écrire les données CSV
+        for (const row of rows) {
+          const csvRow = CONFIG.csvHeaders.map(header => {
+            let value = row[header] || '';
+            
+            if (typeof value === 'string' && (value.includes(CONFIG.csvDelimiter) || value.includes('"') || value.includes('\n'))) {
+              value = `"${value.replace(/"/g, '""')}"`;
+            }
+            
+            return value;
+          }).join(CONFIG.csvDelimiter);
+          
+          res.write(csvRow + '\n');
+          totalWritten++;
+        }
+        
+        offset += rows.length;
+        
+        // Petit délai sur Render gratuit
+        if (CONFIG.isRenderFreeTier && offset % 5000 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+      
+      res.end();
+      
+      console.log(`✅ Export CSV site terminé: ${decodedSite} - ${totalWritten} lignes`);
+      
+    } catch (error) {
+      console.error('❌ Erreur export CSV site:', error);
+      
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: 'Erreur export CSV site: ' + error.message
+        });
+      }
+    } finally {
+      if (client?.release) client.release();
     }
-  }
-
-  // Format téléphone
-  formatPhone(value) {
-    if (!value) return '';
-    const digits = value.toString().replace(/\D/g, '');
-    return digits.substring(0, 8);
-  }
-
-  // Obtenir l'utilisation mémoire
-  getMemoryUsage() {
-    const memory = process.memoryUsage();
-    return {
-      usedMB: Math.round(memory.heapUsed / 1024 / 1024),
-      totalMB: Math.round(memory.heapTotal / 1024 / 1024)
-    };
-  }
-
-  // Obtenir le statut d'un import
-  getImportStatus(importId) {
-    return this.activeImports.get(importId) || null;
-  }
-
-  // Lister les imports actifs
-  listActiveImports() {
-    return Array.from(this.activeImports.values())
-      .filter(imp => ['processing', 'completed', 'failed'].includes(imp.status))
-      .map(imp => ({
-        id: imp.id,
-        filename: imp.filename,
-        status: imp.status,
-        progress: imp.progress,
-        totalRows: imp.totalRows,
-        importedRows: imp.importedRows,
-        errors: imp.errors,
-        startTime: imp.startTime,
-        endTime: imp.endTime
-      }));
-  }
-
-  // Annuler un import
-  cancel() {
-    console.log('🛑 Import annulé');
-    this.emit('cancelled', {
-      timestamp: new Date(),
-      message: 'Import annulé par l\'utilisateur'
-    });
-  }
-}
-
-// ============================================
-// CONTROLEUR PRINCIPAL UNIFIÉ
-// ============================================
-class UnifiedImportExportController {
-  constructor() {
-    this.csvImportService = new SimpleCSVImportService();
-    this.activeImports = new Map();
   }
   
   // ============================================
@@ -350,7 +494,7 @@ class UnifiedImportExportController {
         actionType: 'DEBUT_IMPORT_CSV',
         tableName: 'Cartes',
         importBatchID: importBatchId,
-        details: `Import CSV standard: ${req.file.originalname}`
+        details: `Import CSV: ${req.file.originalname}`
       });
       
       await client.query('BEGIN');
@@ -382,7 +526,7 @@ class UnifiedImportExportController {
         actionType: 'FIN_IMPORT_CSV',
         tableName: 'Cartes',
         importBatchID: importBatchId,
-        details: `Import CSV standard terminé: ${imported} importées, ${errors} erreurs`
+        details: `Import CSV terminé: ${imported} importées, ${errors} erreurs`
       });
       
       res.json({
@@ -420,411 +564,6 @@ class UnifiedImportExportController {
       
       if (client?.release) client.release();
     }
-  }
-  
-  // ============================================
-  // IMPORT CSV AVANCÉ (BULK)
-  // ============================================
-  async importCSVAdvanced(req, res) {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        error: 'Aucun fichier uploadé'
-      });
-    }
-    
-    try {
-      const importBatchId = `csv_adv_${uuidv4()}`;
-      
-      // Stocker l'état
-      const importState = {
-        id: importBatchId,
-        filename: req.file.originalname,
-        status: 'processing',
-        progress: 0,
-        startTime: new Date(),
-        userId: req.user.id
-      };
-      
-      this.activeImports.set(importBatchId, importState);
-      
-      // Démarrer l'import en arrière-plan
-      this.csvImportService.importLargeCSVFile(
-        req.file.path,
-        req.user.id,
-        importBatchId
-      ).then(result => {
-        // Mettre à jour l'état
-        const state = this.activeImports.get(importBatchId);
-        if (state) {
-          state.status = 'completed';
-          state.progress = 100;
-          state.endTime = new Date();
-          state.stats = result.stats;
-        }
-      }).catch(error => {
-        // Mettre à jour l'état en erreur
-        const state = this.activeImports.get(importBatchId);
-        if (state) {
-          state.status = 'failed';
-          state.error = error.message;
-          state.endTime = new Date();
-        }
-      });
-      
-      res.json({
-        success: true,
-        message: 'Import CSV avancé démarré',
-        importId: importBatchId,
-        statusUrl: `/api/import-export/import-status/${importBatchId}`
-      });
-      
-    } catch (error) {
-      console.error('❌ Erreur import CSV avancé:', error);
-      res.status(500).json({
-        success: false,
-        error: 'Erreur import CSV avancé: ' + error.message
-      });
-    }
-  }
-  
-  // ============================================
-  // EXPORT EXCEL
-  // ============================================
-  async exportExcel(req, res) {
-    let client;
-    
-    try {
-      console.log('📤 Export Excel demandé');
-      
-      await journalController.logAction({
-        utilisateurId: req.user.id,
-        actionType: 'DEBUT_EXPORT_EXCEL',
-        tableName: 'Cartes',
-        details: 'Export Excel démarré'
-      });
-      
-      client = await db.getClient();
-      
-      // Récupérer les données
-      const result = await client.query(
-        'SELECT * FROM cartes ORDER BY id LIMIT $1',
-        [CONFIG.maxExportRows]
-      );
-      
-      const rows = result.rows;
-      console.log(`📊 ${rows.length} lignes à exporter en Excel`);
-      
-      // Créer le workbook Excel
-      const workbook = new ExcelJS.Workbook();
-      workbook.creator = 'GESCARD Cocody';
-      workbook.created = new Date();
-      
-      const worksheet = workbook.addWorksheet('Cartes');
-      
-      // Ajouter les en-têtes
-      worksheet.columns = CONFIG.csvHeaders.map(header => ({
-        header,
-        key: header.replace(/\s+/g, '_'),
-        width: 20
-      }));
-      
-      // Ajouter les données
-      rows.forEach(row => {
-        worksheet.addRow(row);
-      });
-      
-      // Style de l'en-tête
-      const headerRow = worksheet.getRow(1);
-      headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-      headerRow.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FF4472C4' }
-      };
-      
-      // Configurer la réponse POUR TÉLÉCHARGEMENT
-      const filename = `export-cartes-${new Date().toISOString().split('T')[0]}.xlsx`;
-      
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-      
-      // Écrire le fichier Excel
-      await workbook.xlsx.write(res);
-      
-      await journalController.logAction({
-        utilisateurId: req.user.id,
-        actionType: 'FIN_EXPORT_EXCEL',
-        tableName: 'Cartes',
-        details: `Export Excel terminé: ${rows.length} lignes`
-      });
-      
-      console.log(`✅ Export Excel terminé: ${rows.length} lignes`);
-      
-    } catch (error) {
-      console.error('❌ Erreur export Excel:', error);
-      
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          error: 'Erreur export Excel: ' + error.message
-        });
-      }
-    } finally {
-      if (client?.release) client.release();
-    }
-  }
-  
-  // ============================================
-  // EXPORT CSV
-  // ============================================
-  async exportCSV(req, res) {
-    let client;
-    
-    try {
-      console.log('📤 Export CSV demandé');
-      
-      await journalController.logAction({
-        utilisateurId: req.user.id,
-        actionType: 'DEBUT_EXPORT_CSV',
-        tableName: 'Cartes',
-        details: 'Export CSV démarré'
-      });
-      
-      client = await db.getClient();
-      
-      // Récupérer les données
-      const result = await client.query(
-        'SELECT * FROM cartes ORDER BY id LIMIT $1',
-        [CONFIG.maxExportRows]
-      );
-      
-      const rows = result.rows;
-      console.log(`📊 ${rows.length} lignes à exporter en CSV`);
-      
-      // Configurer réponse CSV
-      const filename = `export-cartes-${new Date().toISOString().split('T')[0]}.csv`;
-      
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-      
-      // Écrire les en-têtes CSV
-      const headers = CONFIG.csvHeaders.join(CONFIG.csvDelimiter) + '\n';
-      res.write(headers);
-      
-      let written = 0;
-      
-      // Écrire les données
-      for (const row of rows) {
-        const csvRow = CONFIG.csvHeaders.map(header => {
-          let value = row[header] || '';
-          
-          if (typeof value === 'string' && (value.includes(CONFIG.csvDelimiter) || value.includes('"') || value.includes('\n'))) {
-            value = `"${value.replace(/"/g, '""')}"`;
-          }
-          
-          if (header.includes('DATE') && value) {
-            try {
-              const date = new Date(value);
-              if (!isNaN(date.getTime())) {
-                value = date.toISOString().split('T')[0];
-              }
-            } catch (e) {}
-          }
-          
-          return value;
-        }).join(CONFIG.csvDelimiter);
-        
-        res.write(csvRow + '\n');
-        written++;
-        
-        if (written % 1000 === 0) {
-          console.log(`📝 CSV: ${written} lignes écrites`);
-        }
-      }
-      
-      res.end();
-      
-      await journalController.logAction({
-        utilisateurId: req.user.id,
-        actionType: 'FIN_EXPORT_CSV',
-        tableName: 'Cartes',
-        details: `Export CSV terminé: ${written} lignes`
-      });
-      
-      console.log(`✅ Export CSV terminé: ${written} lignes`);
-      
-    } catch (error) {
-      console.error('❌ Erreur export CSV:', error);
-      
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          error: 'Erreur export CSV: ' + error.message
-        });
-      }
-    } finally {
-      if (client?.release) client.release();
-    }
-  }
-  
-  // ============================================
-  // EXPORT CSV PAR SITE
-  // ============================================
-  async exportCSVBySite(req, res) {
-    let client;
-    
-    try {
-      const { siteRetrait } = req.query;
-      
-      if (!siteRetrait) {
-        return res.status(400).json({
-          success: false,
-          error: 'Paramètre siteRetrait requis'
-        });
-      }
-      
-      const decodedSite = decodeURIComponent(siteRetrait)
-        .replace(/\+/g, ' ')
-        .trim();
-      
-      console.log(`📤 Export CSV pour site: ${decodedSite}`);
-      
-      client = await db.getClient();
-      
-      // Vérifier existence
-      const siteCheck = await client.query(
-        'SELECT COUNT(*) as count FROM cartes WHERE "SITE DE RETRAIT" = $1',
-        [decodedSite]
-      );
-      
-      const count = parseInt(siteCheck.rows[0].count);
-      
-      if (count === 0) {
-        return res.status(404).json({
-          success: false,
-          error: `Aucune donnée pour le site: ${decodedSite}`
-        });
-      }
-      
-      // Récupérer données
-      const result = await client.query(
-        'SELECT * FROM cartes WHERE "SITE DE RETRAIT" = $1 ORDER BY id',
-        [decodedSite]
-      );
-      
-      const rows = result.rows;
-      
-      // Configurer réponse
-      const safeSiteName = decodedSite.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-      const filename = `export-${safeSiteName}.csv`;
-      
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      
-      // Écrire les en-têtes CSV
-      const headers = CONFIG.csvHeaders.join(CONFIG.csvDelimiter) + '\n';
-      res.write(headers);
-      
-      let written = 0;
-      
-      // Écrire les données
-      for (const row of rows) {
-        const csvRow = CONFIG.csvHeaders.map(header => {
-          let value = row[header] || '';
-          
-          if (typeof value === 'string' && (value.includes(CONFIG.csvDelimiter) || value.includes('"') || value.includes('\n'))) {
-            value = `"${value.replace(/"/g, '""')}"`;
-          }
-          
-          return value;
-        }).join(CONFIG.csvDelimiter);
-        
-        res.write(csvRow + '\n');
-        written++;
-      }
-      
-      res.end();
-      
-      console.log(`✅ Export CSV site terminé: ${decodedSite} - ${written} lignes`);
-      
-    } catch (error) {
-      console.error('❌ Erreur export CSV site:', error);
-      
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          error: 'Erreur export CSV site: ' + error.message
-        });
-      }
-    } finally {
-      if (client?.release) client.release();
-    }
-  }
-  
-  // ============================================
-  // STATUT IMPORT CSV AVANCÉ
-  // ============================================
-  async getImportStatus(req, res) {
-    const { importId } = req.params;
-    
-    const status = this.csvImportService.getImportStatus(importId) || 
-                   this.activeImports.get(importId);
-    
-    if (!status) {
-      return res.status(404).json({
-        success: false,
-        error: 'Import non trouvé'
-      });
-    }
-    
-    res.json({
-      success: true,
-      status
-    });
-  }
-  
-  // ============================================
-  // LISTE DES IMPORTS ACTIFS
-  // ============================================
-  async listActiveImports(req, res) {
-    const imports = this.csvImportService.listActiveImports();
-    
-    res.json({
-      success: true,
-      imports,
-      total: imports.length
-    });
-  }
-  
-  // ============================================
-  // ANNULER UN IMPORT
-  // ============================================
-  async cancelImport(req, res) {
-    const { importId } = req.params;
-    
-    this.csvImportService.cancel();
-    
-    // Mettre à jour l'état local
-    const state = this.activeImports.get(importId);
-    if (state) {
-      state.status = 'cancelled';
-      state.endTime = new Date();
-    }
-    
-    res.json({
-      success: true,
-      message: 'Import annulé'
-    });
   }
   
   // ============================================
@@ -936,7 +675,7 @@ class UnifiedImportExportController {
   }
   
   // ============================================
-  // AUTRES MÉTHODES (COMPATIBILITÉ)
+  // AUTRES MÉTHODES
   // ============================================
   
   async getSitesList(req, res) {
@@ -1005,94 +744,84 @@ class UnifiedImportExportController {
   }
   
   // ============================================
-  // MÉTHODES DE COMPATIBILITÉ (alias)
+  // MÉTHODES DE DIAGNOSTIC
   // ============================================
   
-  async importExcel(req, res) {
-    console.log('🔄 Import Excel redirigé vers import CSV');
-    return this.importCSV(req, res);
-  }
-  
-  async importSmartSync(req, res) {
-    console.log('🔄 Import Smart Sync redirigé vers import CSV');
-    return this.importCSV(req, res);
-  }
-  
-  async exportStream(req, res) {
-    console.log('🔄 Export Stream redirigé vers export Excel');
-    return this.exportExcel(req, res);
-  }
-  
-  async exportOptimized(req, res) {
-    console.log('🔄 Export Optimized redirigé vers export CSV');
-    return this.exportCSV(req, res);
-  }
-  
-  async exportFiltered(req, res) {
-    console.log('🔄 Export Filtered redirigé vers export CSV par site');
-    
-    const { siteRetrait, filters } = req.body;
-    
-    if (!siteRetrait) {
-      return res.status(400).json({
+  async diagnostic(req, res) {
+    try {
+      const memoryUsage = process.memoryUsage();
+      const uptime = process.uptime();
+      
+      // Vérifier la connexion à la base de données
+      const dbCheck = await db.query('SELECT 1 as test');
+      
+      res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        service: 'import-export-optimized',
+        environment: CONFIG.isRenderFreeTier ? 'render-free' : 'normal',
+        config: {
+          maxExportRows: CONFIG.maxExportRows,
+          maxImportRows: CONFIG.maxImportRows,
+          exportTimeout: CONFIG.exportTimeout,
+          memoryLimitMB: CONFIG.memoryLimitMB
+        },
+        memory: {
+          heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + 'MB',
+          heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024) + 'MB',
+          rss: Math.round(memoryUsage.rss / 1024 / 1024) + 'MB',
+          external: Math.round(memoryUsage.external / 1024 / 1024) + 'MB'
+        },
+        uptime: Math.round(uptime) + ' seconds',
+        database: dbCheck.rows.length > 0 ? 'connected' : 'disconnected',
+        activeExports: this.activeExports.size,
+        recommendations: CONFIG.isRenderFreeTier ? [
+          '✅ Utilisez CSV pour les exports (plus rapide et stable)',
+          '⚠️ Limitez les exports à 5000 lignes maximum',
+          '⏱️ Les exports prennent plus de temps sur Render gratuit',
+          '💡 Exportez par site pour réduire la taille des fichiers'
+        ] : [
+          '✅ Tous les formats sont supportés',
+          '⚡ Performance normale'
+        ]
+      });
+      
+    } catch (error) {
+      console.error('❌ Erreur diagnostic:', error);
+      res.status(500).json({
         success: false,
-        error: 'Paramètre siteRetrait requis'
+        error: 'Erreur diagnostic: ' + error.message
       });
     }
-    
-    req.query = { siteRetrait };
-    return this.exportCSVBySite(req, res);
-  }
-  
-  async exportResultats(req, res) {
-    console.log('🔄 Export Resultats redirigé vers export CSV par site');
-    
-    const { siteRetrait } = req.query;
-    
-    if (!siteRetrait) {
-      return res.status(400).json({
-        success: false,
-        error: 'Paramètre siteRetrait requis'
-      });
-    }
-    
-    return this.exportCSVBySite(req, res);
   }
 }
 
 // ============================================
-// EXPORT UNIFIÉ
+// EXPORT OPTIMISÉ
 // ============================================
-const controller = new UnifiedImportExportController();
+const controller = new OptimizedImportExportController();
 
 module.exports = {
-  // Import CSV
+  // Import
   importCSV: controller.importCSV.bind(controller),
-  importCSVAdvanced: controller.importCSVAdvanced.bind(controller),
-  
-  // Import (compatibilité)
-  importExcel: controller.importExcel.bind(controller),
-  importSmartSync: controller.importSmartSync.bind(controller),
   
   // Export
   exportExcel: controller.exportExcel.bind(controller),
   exportCSV: controller.exportCSV.bind(controller),
   exportCSVBySite: controller.exportCSVBySite.bind(controller),
   
-  // Export (compatibilité)
-  exportStream: controller.exportStream.bind(controller),
-  exportOptimized: controller.exportOptimized.bind(controller),
-  exportFiltered: controller.exportFiltered.bind(controller),
-  exportResultats: controller.exportResultats.bind(controller),
-  
-  // Gestion imports
-  getImportStatus: controller.getImportStatus.bind(controller),
-  listActiveImports: controller.listActiveImports.bind(controller),
-  cancelImport: controller.cancelImport.bind(controller),
-  
   // Utilitaires
   getSitesList: controller.getSitesList.bind(controller),
   downloadTemplate: controller.downloadTemplate.bind(controller),
+  diagnostic: controller.diagnostic.bind(controller),
+  
+  // Compatibilité
+  importExcel: controller.importCSV.bind(controller),
+  importSmartSync: controller.importCSV.bind(controller),
+  exportStream: controller.exportExcel.bind(controller),
+  exportOptimized: controller.exportCSV.bind(controller),
+  exportFiltered: controller.exportCSVBySite.bind(controller),
+  exportResultats: controller.exportCSVBySite.bind(controller),
   
   // Accès au contrôleur pour debug
   _controller: controller

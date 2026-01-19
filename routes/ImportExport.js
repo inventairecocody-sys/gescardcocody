@@ -35,7 +35,7 @@ const upload = multer({
   storage, 
   fileFilter, 
   limits: { 
-    fileSize: 30 * 1024 * 1024, // 30MB
+    fileSize: 20 * 1024 * 1024, // 20MB (réduit pour Render gratuit)
     files: 1
   }
 });
@@ -49,26 +49,14 @@ router.use(importExportAccess);
 // 📥 IMPORT CSV STANDARD
 router.post('/import/csv', importExportRateLimit, upload.single('file'), importExportController.importCSV);
 
-// 🚀 IMPORT CSV AVANCÉ (BULK)
-router.post('/import/csv/advanced', importExportRateLimit, upload.single('file'), importExportController.importCSVAdvanced);
-
-// 📤 EXPORT EXCEL
+// 📤 EXPORT EXCEL (OPTIMISÉ)
 router.get('/export', importExportRateLimit, importExportController.exportExcel);
 
-// 📤 EXPORT CSV
+// 📤 EXPORT CSV (OPTIMISÉ)
 router.get('/export/csv', importExportRateLimit, importExportController.exportCSV);
 
 // 🔍 EXPORT CSV PAR SITE
 router.get('/export/csv/site', importExportRateLimit, importExportController.exportCSVBySite);
-
-// 📊 STATUT IMPORT CSV AVANCÉ
-router.get('/import-status/:importId', importExportController.getImportStatus);
-
-// 📋 LISTE IMPORTS ACTIFS
-router.get('/imports/active', importExportController.listActiveImports);
-
-// 🛑 ANNULER IMPORT
-router.post('/import/cancel/:importId', importExportController.cancelImport);
 
 // 📋 TEMPLATE
 router.get('/template', importExportController.downloadTemplate);
@@ -76,16 +64,19 @@ router.get('/template', importExportController.downloadTemplate);
 // 🏢 LISTE SITES
 router.get('/sites', importExportController.getSitesList);
 
+// 🩺 DIAGNOSTIC
+router.get('/diagnostic', importExportController.diagnostic);
+
 // ==================== ROUTES DE COMPATIBILITÉ ====================
 
 // 📥 IMPORT EXCEL (redirection)
-router.post('/import', importExportRateLimit, upload.single('file'), importExportController.importCSV);
+router.post('/import', importExportRateLimit, upload.single('file'), importExportController.importExcel);
 
 // 🔄 IMPORT INTELLIGENT (redirection)
-router.post('/import/smart-sync', importExportRateLimit, upload.single('file'), importExportController.importCSV);
+router.post('/import/smart-sync', importExportRateLimit, upload.single('file'), importExportController.importSmartSync);
 
 // 📤 EXPORT STREAMING (redirection)
-router.get('/export/stream', importExportRateLimit, importExportController.exportExcel);
+router.get('/export/stream', importExportRateLimit, importExportController.exportStream);
 
 // 🎛️ EXPORT FILTRÉ (redirection)
 router.post('/export/filtered', importExportRateLimit, importExportController.exportFiltered);
@@ -94,39 +85,48 @@ router.post('/export/filtered', importExportRateLimit, importExportController.ex
 router.get('/export-resultats', importExportRateLimit, importExportController.exportResultats);
 
 // 📤 EXPORT OPTIMISÉ (redirection)
-router.get('/export/optimized', importExportRateLimit, importExportController.exportCSV);
+router.get('/export/optimized', importExportRateLimit, importExportController.exportOptimized);
 
-// ==================== ROUTES UTILITAIRES ====================
+// ==================== ROUTES DE SANTÉ ====================
 
 // 🩺 SANTÉ
 router.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
-    service: 'import-export-unified',
+    service: 'import-export-optimized',
     timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
     endpoints: {
       importCSV: 'POST /import/csv',
-      importCSVAdvanced: 'POST /import/csv/advanced',
       exportExcel: 'GET /export',
       exportCSV: 'GET /export/csv',
       exportBySite: 'GET /export/csv/site',
-      importStatus: 'GET /import-status/:id',
-      template: 'GET /template'
-    }
+      template: 'GET /template',
+      sites: 'GET /sites',
+      diagnostic: 'GET /diagnostic'
+    },
+    recommendations: [
+      '✅ Utilisez /export/csv pour les exports optimisés',
+      '⚠️ /export (Excel) est plus lent sur les gros fichiers',
+      '💡 Exportez par site pour de meilleures performances'
+    ]
   });
 });
 
-// 🔧 DIAGNOSTIC
-router.get('/diagnostic', (req, res) => {
-  const controller = importExportController._controller;
-  const csvService = controller ? controller.csvImportService : null;
-  
+// 🧪 TEST SIMPLE
+router.get('/test', (req, res) => {
   res.json({
     success: true,
-    controller: 'UnifiedImportExportController',
-    activeImports: csvService ? csvService.listActiveImports().length : 0,
-    memory: process.memoryUsage(),
-    environment: process.env.NODE_ENV || 'development'
+    message: 'Import/Export API fonctionnelle',
+    timestamp: new Date().toISOString(),
+    version: '2.0.0-optimized',
+    features: [
+      'Export CSV optimisé (streaming)',
+      'Export Excel avec limites',
+      'Import CSV par lots',
+      'Export par site',
+      'Diagnostic intégré'
+    ]
   });
 });
 
