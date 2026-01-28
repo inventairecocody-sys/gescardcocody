@@ -1,0 +1,6 @@
+node_modules/
+.env
+.env.local
+get-token.js
+google-tokens-backup.json
+*.log
