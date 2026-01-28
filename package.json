@@ -1,0 +1,85 @@
+{
+  "name": "gescard-backend",
+  "version": "1.2.0",
+  "description": "API backend PostgreSQL pour GESCard Cocody avec fusion intelligente et optimisations Render gratuit",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --max-old-space-size=512 server.js",
+    "dev": "nodemon --max-old-space-size=512 server.js",
+    "dev:monitor": "nodemon --max-old-space-size=512 --inspect server.js",
+    "test": "jest --verbose",
+    "test:api": "node tests/api-test.js",
+    "test:memory": "node tests/memory-test.js",
+    "test:export": "node tests/export-test.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "migrate": "node scripts/migrate.js",
+    "migrate:seed": "node scripts/seed.js",
+    "render-build": "npm install && echo '✅ Build Render.com terminé'",
+    "diagnostic": "node scripts/diagnostic.js",
+    "diagnostic:memory": "node scripts/memory-diagnostic.js",
+    "clean": "rm -rf node_modules package-lock.json && npm install",
+    "profile": "node --prof server.js",
+    "profile:analyze": "node --prof-process isolate-*.log > profile.txt"
+  },
+  "keywords": [
+    "postgresql",
+    "api",
+    "cartes",
+    "synchronisation",
+    "fusion-intelligente",
+    "render-free-tier",
+    "optimized",
+    "streaming"
+  ],
+  "author": "GESCard Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^16.6.1",
+    "eventemitter3": "^5.0.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.22.1",
+    "express-rate-limit": "^7.5.1",
+    "googleapis": "^170.1.0",
+    "helmet": "^7.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.1",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^4.2.1",
+    "pg": "^8.17.2",
+    "stream-json": "^1.8.0",
+    "uuid": "^13.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^8.0.2",
+    "eslint": "^8.47.0",
+    "jest": "^29.6.2",
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/votre-repo/gescard-backend"
+  },
+  "bugs": {
+    "url": "https://github.com/votre-repo/gescard-backend/issues"
+  },
+  "homepage": "https://github.com/votre-repo/gescard-backend#readme",
+  "render": {
+    "env": {
+      "NODE_ENV": "production",
+      "NODE_OPTIONS": "--max-old-space-size=512"
+    }
+  }
+}
