@@ -77,18 +77,18 @@ async function setupBackupSystem() {
       }
     }
     
-    // Backup automatique tous les jours à 2h du matin
-    cron.schedule('0 2 * * *', async () => {
-      console.log('⏰ Backup automatique programmé...');
+    // ⭐ MODIFICATION ICI : Backup automatique tous les jours à 13h30 UTC (heure d'Abidjan)
+    cron.schedule('30 13 * * *', async () => {
+      console.log('⏰ Backup automatique programmé (13h30 UTC - heure d\'Abidjan)...');
       try {
         await backupService.executeBackup();
-        console.log('✅ Backup automatique réussi');
+        console.log('✅ Backup automatique réussi à 13h30');
       } catch (error) {
         console.error('❌ Backup automatique échoué:', error.message);
       }
     });
     
-    console.log('✅ Système de backup configuré (tous les jours à 2h)');
+    console.log('✅ Système de backup configuré (tous les jours à 13h30 UTC)');
     console.log('📁 Backups sauvegardés sur Google Drive -> dossier "gescard_backups"');
     
   } catch (error) {
@@ -596,7 +596,7 @@ app.get("/api/health", async (req, res) => {
       backup_system: {
         status: backupStatus,
         google_drive: googleDriveStatus,
-        auto_backup: 'daily_at_2am',
+        auto_backup: 'daily_at_13h30_UTC', // ⭐ MODIFICATION ICI
         auto_restore: process.env.AUTO_RESTORE === 'true' ? 'enabled' : 'disabled',
         endpoints: {
           create_backup: '/api/backup/create',
@@ -672,7 +672,7 @@ app.get("/api/debug/external", async (req, res) => {
     let backupInfo = {
       configured: process.env.GOOGLE_CLIENT_ID ? true : false,
       auto_restore: process.env.AUTO_RESTORE === 'true',
-      next_backup: '02:00 UTC daily'
+      next_backup: '13:30 UTC daily' // ⭐ MODIFICATION ICI
     };
     
     if (process.env.GOOGLE_CLIENT_ID) {
@@ -727,13 +727,13 @@ app.get("/api/debug/external", async (req, res) => {
         export_complet_limit: '3/heure',
         import_timeout: '4min',
         export_timeout: '5-10min pour complet',
-        backup_auto: 'daily',
+        backup_auto: 'daily à 13h30 UTC', // ⭐ MODIFICATION ICI
         advice: [
           `Vous avez ${totalCartes.toLocaleString()} cartes`,
           'Utilisez /export/all pour le format optimal',
           'CSV recommandé pour > 20,000 lignes',
           'Limitez les exports complets à 3/heure',
-          backupInfo.configured ? '✅ Backup automatique activé' : '⚠️  Backup non configuré'
+          backupInfo.configured ? `✅ Backup automatique activé (13h30 UTC)` : '⚠️  Backup non configuré'
         ]
       } : {
         max_upload_size: '100MB',
@@ -742,12 +742,12 @@ app.get("/api/debug/external", async (req, res) => {
         export_complet_limit: '10/heure',
         import_timeout: '5min',
         export_timeout: '10min pour complet',
-        backup_auto: 'daily',
+        backup_auto: 'daily à 13h30 UTC', // ⭐ MODIFICATION ICI
         advice: [
           `Vous avez ${totalCartes.toLocaleString()} cartes`,
           'Utilisez /export/all pour le format optimal',
           'Tous les formats disponibles',
-          backupInfo.configured ? '✅ Backup automatique activé' : '⚠️  Backup non configuré'
+          backupInfo.configured ? `✅ Backup automatique activé (13h30 UTC)` : '⚠️  Backup non configuré'
         ]
       },
       endpoints_recommendation: [
@@ -848,7 +848,7 @@ app.get("/", (req, res) => {
     note_importante: [
       "Les exports complets peuvent prendre plusieurs minutes pour les gros volumes de données",
       ...(hasBackup ? [
-        "✅ Backup automatique activé (tous les jours à 2h)",
+        "✅ Backup automatique activé (tous les jours à 13h30 UTC)", // ⭐ MODIFICATION ICI
         "✅ Restauration automatique si base vide",
         "📁 Sauvegardes stockées sur Google Drive"
       ] : [
@@ -1107,7 +1107,7 @@ const server = app.listen(PORT, async () => {
   console.log('• 🎯 Timeouts adaptatifs: 5-10min pour les exports complets');
   
   console.log('\n🔐 NOUVELLES FONCTIONNALITÉS DE BACKUP:');
-  console.log('• ✅ Backup automatique quotidien (2h du matin)');
+  console.log('• ✅ Backup automatique quotidien (13h30 UTC - heure d\'Abidjan)'); // ⭐ MODIFICATION ICI
   console.log('• 🔄 Restauration automatique si base vide');
   console.log('• 📁 Stockage sur Google Drive (dossier "gescard_backups")');
   console.log('• 🔧 Routes: /api/backup/create, /api/backup/list, /api/backup/restore');
@@ -1136,7 +1136,7 @@ const server = app.listen(PORT, async () => {
     console.log('• Limit complete exports to 3 per hour');
     console.log('\n💾 BACKUP SYSTEM INFO:');
     console.log('• Backups are stored in Google Drive folder "gescard_backups"');
-    console.log('• Automatic backup every day at 2:00 AM');
+    console.log('• Automatic backup every day at 13:30 UTC (heure d\'Abidjan)'); // ⭐ MODIFICATION ICI
     console.log('• Auto-restore if database is empty (Render monthly reset)');
     console.log('• Check /api/backup/status for backup system health');
     console.log('• Use /api/backup/create for manual backup');

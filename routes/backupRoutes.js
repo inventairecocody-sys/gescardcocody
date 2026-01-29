@@ -3,130 +3,229 @@ const router = express.Router();
 const PostgreSQLBackup = require('../backup-postgres');
 const PostgreSQLRestorer = require('../restore-postgres');
 
+// ⭐⭐⭐ UTILISEZ VOS VRAIS MIDDLEWARE ⭐⭐⭐
+const { verifyToken } = require('../middleware/auth');
+const adminOnly = require('../middleware/adminOnly');
+
+// Rate limiting pour les routes publiques
+const rateLimit = require('express-rate-limit');
+
 const backupService = new PostgreSQLBackup();
 const restoreService = new PostgreSQLRestorer();
 
-// Middleware d'authentification (vous l'avez déjà)
-const authenticate = (req, res, next) => {
-  // Adaptez cette fonction à votre système d'authentification
-  if (!req.user) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentification requise'
-    });
-  }
-  next();
-};
+// Variables pour suivre l'état (gardez-les)
+let lastBackupTime = null;
+let backupInProgress = false;
 
-// 1. Créer un backup manuel (PUBLIQUE POUR TEST - normalement ADMIN SEULEMENT)
-router.post('/create', async (req, res) => {
+// ==================== RATE LIMITING ====================
+
+// Rate limiting pour les routes publiques
+const publicRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 requêtes max
+  message: {
+    success: false,
+    message: 'Trop de requêtes. Veuillez réessayer dans 15 minutes.'
+  }
+});
+
+// Rate limiting plus strict pour les routes sensibles
+const strictRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 heure
+  max: 5, // 5 requêtes max
+  message: {
+    success: false,
+    message: 'Limite de sécurité atteinte. Veuillez réessayer dans 1 heure.'
+  }
+});
+
+// ==================== ROUTES PUBLIQUES (LIMITÉES) ====================
+
+// 1. Vérifier l'état du backup (PUBLIQUE MAIS LIMITÉE)
+router.get('/status', publicRateLimiter, async (req, res) => {
   try {
-    console.log('📤 Backup manuel demandé');
+    const hasBackups = await backupService.hasBackups();
     
-    // Simuler un utilisateur pour compatibilité
-    req.user = { nomUtilisateur: 'public-backup', profil: 'admin' };
-    
-    const backupResult = await backupService.executeBackup();
-    
+    // Informations basiques seulement
     res.json({
       success: true,
-      message: 'Backup créé avec succès',
-      backup: {
-        name: backupResult.name,
-        link: backupResult.webViewLink,
-        timestamp: new Date().toISOString(),
-        folderId: '1EDj5fNR27ZcJ6txXcUYFOhmnn8WdzbWP'
-      },
-      notes: [
-        'Backup stocké sur Google Drive',
-        'Dossier: gescard_backups',
-        'Backup automatique à 2h UTC'
-      ]
+      status: hasBackups ? 'backups_available' : 'no_backups',
+      message: hasBackups ? '✅ Sauvegardes disponibles' : '📭 Aucune sauvegarde',
+      requires_auth_for_details: true,
+      admin_required_for_actions: true
     });
     
   } catch (error) {
-    console.error('❌ Erreur backup:', error);
-    res.status(500).json({
+    res.json({
       success: false,
-      message: 'Erreur lors de la création du backup',
-      error: error.message,
-      advice: 'Vérifiez la configuration Google Drive sur Render'
+      status: 'error',
+      message: 'Erreur de vérification'
     });
   }
 });
 
-// 2. Restaurer la base de données (ADMIN SEULEMENT)
-router.post('/restore', authenticate, async (req, res) => {
+// 2. Test Google Drive (PUBLIQUE MAIS LIMITÉE)
+router.get('/test', strictRateLimiter, async (req, res) => {
   try {
-    console.log('🔄 Restauration demandée par:', req.user.nomUtilisateur);
-    
-    // Vérification de sécurité
-    if (req.user.profil !== 'admin') {
-      return res.status(403).json({
+    if (!process.env.GOOGLE_CLIENT_ID) {
+      return res.status(400).json({
         success: false,
-        message: 'Seuls les administrateurs peuvent restaurer la base'
+        message: 'Google Drive non configuré',
+        requires_admin: true
       });
     }
     
-    await restoreService.executeRestoration();
+    await backupService.authenticate();
+    const folderId = await backupService.getOrCreateBackupFolder();
     
     res.json({
       success: true,
-      message: 'Base de données restaurée avec succès',
-      timestamp: new Date().toISOString()
+      message: '✅ Google Drive fonctionnel',
+      requires_auth_for_actions: true
     });
     
   } catch (error) {
-    console.error('❌ Erreur restauration:', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      message: 'Google Drive non fonctionnel'
     });
   }
 });
 
-// 3. Lister les backups disponibles (PUBLIQUE POUR TEST)
-router.get('/list', async (req, res) => {
+// 3. Informations système (PUBLIQUE MAIS LIMITÉE)
+router.get('/info', publicRateLimiter, async (req, res) => {
   try {
-    const backups = await backupService.listBackups();
+    const googleDriveConfigured = !!process.env.GOOGLE_CLIENT_ID;
     
     res.json({
       success: true,
-      count: backups.length,
-      message: backups.length > 0 
-        ? `${backups.length} backups disponibles sur Google Drive`
-        : 'Aucun backup trouvé - Créez-en un avec /api/backup/create',
-      backups: backups.map(backup => ({
-        id: backup.id,
-        name: backup.name,
-        created: new Date(backup.createdTime).toLocaleString('fr-FR'),
-        size: backup.size ? `${Math.round(backup.size / 1024 / 1024)} MB` : 'N/A',
-        type: backup.name.endsWith('.sql') ? 'SQL' : 'JSON',
-        viewLink: `https://drive.google.com/file/d/${backup.id}/view`,
-        downloadLink: `https://drive.google.com/uc?export=download&id=${backup.id}`
-      })),
-      googleDriveInfo: {
-        folderName: 'gescard_backups',
-        folderId: '1EDj5fNR27ZcJ6txXcUYFOhmnn8WdzbWP'
+      system: 'GesCard Backup System',
+      status: googleDriveConfigured ? 'configured' : 'not_configured',
+      security: {
+        authentication_required: true,
+        admin_role_required: true,
+        encrypted_backups: false // À implémenter
       }
     });
     
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Erreur lors de la récupération des backups',
-      error: error.message,
-      advice: 'Google Drive pourrait ne pas être configuré ou accessible'
+      message: 'Erreur système'
     });
   }
 });
 
-// 4. Vérifier l'état du backup (PUBLIQUE)
-router.get('/status', async (req, res) => {
+// ==================== ROUTES AUTHENTIFIÉES (TOUS UTILISATEURS) ====================
+
+// 4. Lister les backups (AUTH REQUISE)
+router.get('/list', verifyToken, async (req, res) => {
   try {
-    const hasBackups = await backupService.hasBackups();
+    console.log('📋 Liste backups demandée par:', req.user.NomUtilisateur);
     
-    // Informations supplémentaires
+    const backups = await backupService.listBackups();
+    backups.sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
+    
+    const isAdmin = req.user.Role === 'Administrateur';
+    
+    res.json({
+      success: true,
+      count: backups.length,
+      backups: backups.map(backup => ({
+        id: backup.id,
+        name: backup.name,
+        created: new Date(backup.createdTime).toLocaleString('fr-FR'),
+        size: backup.size ? `${Math.round(backup.size / 1024 / 1024)} MB` : 'N/A',
+        type: backup.name.endsWith('.sql') ? 'SQL' : 'JSON',
+        // ⚠️ NE PAS ENVOYER LES LIENS AUX NON-ADMINS
+        ...(isAdmin ? {
+          viewLink: `https://drive.google.com/file/d/${backup.id}/view`
+        } : {})
+      })),
+      security: {
+        authenticatedUser: req.user.NomUtilisateur,
+        userRole: req.user.Role,
+        canDownload: isAdmin,
+        canRestore: isAdmin
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Erreur récupération backups',
+      error: error.message
+    });
+  }
+});
+
+// ==================== ROUTES ADMIN SEULEMENT ====================
+
+// 5. Créer un backup manuel (ADMIN SEULEMENT)
+router.post('/create', verifyToken, adminOnly, strictRateLimiter, async (req, res) => {
+  try {
+    console.log('📤 Backup manuel par admin:', req.user.NomUtilisateur);
+    
+    if (backupInProgress) {
+      return res.status(429).json({
+        success: false,
+        message: 'Backup déjà en cours'
+      });
+    }
+    
+    if (lastBackupTime && (Date.now() - lastBackupTime) < 60 * 60 * 1000) {
+      return res.status(429).json({
+        success: false,
+        message: 'Attendez 1 heure entre les backups'
+      });
+    }
+    
+    backupInProgress = true;
+    
+    const backupResult = await backupService.executeBackup();
+    
+    lastBackupTime = Date.now();
+    backupInProgress = false;
+    
+    res.json({
+      success: true,
+      message: 'Backup créé avec succès',
+      backup: {
+        name: backupResult.name,
+        timestamp: new Date().toISOString()
+      },
+      security: {
+        performedBy: req.user.NomUtilisateur,
+        userRole: req.user.Role,
+        ip: req.ip
+      }
+    });
+    
+  } catch (error) {
+    backupInProgress = false;
+    res.status(500).json({
+      success: false,
+      message: 'Erreur création backup',
+      error: error.message
+    });
+  }
+});
+
+// 6. Restaurer la base (ADMIN SEULEMENT - OPÉRATION DANGEREUSE)
+router.post('/restore', verifyToken, adminOnly, strictRateLimiter, async (req, res) => {
+  try {
+    console.log('🔄 Restauration demandée par admin:', req.user.NomUtilisateur);
+    
+    // Confirmation supplémentaire requise
+    if (req.body.confirm !== 'YES_I_CONFIRM_RESTORE') {
+      return res.status(400).json({
+        success: false,
+        message: 'Confirmation requise',
+        error: 'Ajoutez { "confirm": "YES_I_CONFIRM_RESTORE" } pour confirmer cette opération DANGEREUSE'
+      });
+    }
+    
+    // Backup pré-restauration si données existent
     const client = new (require('pg')).Client({
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false }
@@ -137,78 +236,45 @@ router.get('/status', async (req, res) => {
     const totalCartes = parseInt(countResult.rows[0].total);
     await client.end();
     
-    res.json({
-      success: true,
-      status: hasBackups ? 'backups_available' : 'no_backups',
-      message: hasBackups 
-        ? '✅ Sauvegardes disponibles sur Google Drive' 
-        : '📭 Aucune sauvegarde trouvée',
-      data: {
-        cartes_in_database: totalCartes,
-        google_drive_configured: !!process.env.GOOGLE_CLIENT_ID,
-        auto_backup_enabled: true,
-        next_backup_time: '02:00 UTC (tous les jours)'
-      },
-      actions: {
-        create_backup: 'POST /api/backup/create',
-        list_backups: 'GET /api/backup/list',
-        restore_backup: 'POST /api/backup/restore (authentification requise)'
-      },
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    res.json({
-      success: false,
-      status: 'error',
-      message: 'Erreur lors de la vérification du statut',
-      error: error.message
-    });
-  }
-});
-
-// 5. Télécharger un backup spécifique (PUBLIQUE POUR TEST)
-router.post('/download', async (req, res) => {
-  try {
-    const { backupId } = req.body;
-    
-    if (!backupId) {
-      return res.status(400).json({
-        success: false,
-        message: 'ID du backup requis',
-        advice: 'Utilisez /api/backup/list pour obtenir les IDs disponibles'
-      });
+    let preRestoreBackup = null;
+    if (totalCartes > 0) {
+      console.log(`💾 Backup pré-restauration (${totalCartes} cartes)`);
+      try {
+        preRestoreBackup = await backupService.executeBackup();
+      } catch (backupError) {
+        console.warn('⚠️ Backup pré-restauration échoué');
+      }
     }
     
-    // Cette route fournit le lien direct vers Google Drive
+    // Exécuter la restauration
+    await restoreService.executeRestoration();
+    
     res.json({
       success: true,
-      message: 'Liens de téléchargement générés',
-      links: {
-        download: `https://drive.google.com/uc?export=download&id=${backupId}`,
-        view: `https://drive.google.com/file/d/${backupId}/view`,
-        api_direct: `${req.protocol}://${req.get('host')}/api/backup/download/${backupId}`
-      },
-      instructions: [
-        '1. Utilisez le lien "download" pour télécharger directement',
-        '2. Le lien "view" ouvre le fichier dans Google Drive',
-        '3. Le backup est automatique tous les jours à 2h UTC'
-      ]
+      message: 'Base restaurée avec succès',
+      warning: 'TOUTES LES DONNÉES ONT ÉTÉ REMPLACÉES',
+      pre_restore_backup: preRestoreBackup ? 'Créé avec succès' : 'Non nécessaire',
+      security: {
+        performedBy: req.user.NomUtilisateur,
+        userRole: req.user.Role,
+        ip: req.ip,
+        timestamp: new Date().toISOString()
+      }
     });
     
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Erreur lors de la génération des liens',
+      message: 'Erreur restauration',
       error: error.message
     });
   }
 });
 
-// 6. Télécharger un backup par ID (nouvelle route publique)
-router.get('/download/:backupId', async (req, res) => {
+// 7. Télécharger un backup (ADMIN SEULEMENT)
+router.post('/download', verifyToken, adminOnly, async (req, res) => {
   try {
-    const { backupId } = req.params;
+    const { backupId } = req.body;
     
     if (!backupId) {
       return res.status(400).json({
@@ -217,50 +283,130 @@ router.get('/download/:backupId', async (req, res) => {
       });
     }
     
-    // Rediriger vers Google Drive
-    res.redirect(`https://drive.google.com/uc?export=download&id=${backupId}`);
+    // Vérifier que le backup existe
+    const backups = await backupService.listBackups();
+    const backupExists = backups.some(b => b.id === backupId);
     
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Erreur de redirection',
-      error: error.message
+    if (!backupExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Backup non trouvé'
+      });
+    }
+    
+    console.log('📥 Téléchargement backup par admin:', {
+      backupId: backupId,
+      user: req.user.NomUtilisateur,
+      ip: req.ip
     });
-  }
-});
-
-// 7. Synchronisation pour application desktop (AUTH REQUISE)
-router.post('/sync/local-export', authenticate, async (req, res) => {
-  try {
-    const { data, lastSync } = req.body;
-    
-    console.log(`📨 Sync depuis application desktop: ${Object.keys(data).length} tables`);
-    
-    // Créer un backup après réception des données
-    await backupService.executeBackup();
     
     res.json({
       success: true,
-      message: 'Données synchronisées et backup créé',
-      timestamp: new Date().toISOString(),
-      backupCreated: true,
-      backupInfo: {
-        location: 'Google Drive',
-        folder: 'gescard_backups',
-        frequency: 'Automatique à 2h UTC'
+      message: 'Lien généré',
+      links: {
+        download: `https://drive.google.com/uc?export=download&id=${backupId}`,
+        view: `https://drive.google.com/file/d/${backupId}/view`
+      },
+      security: {
+        downloadedBy: req.user.NomUtilisateur,
+        timestamp: new Date().toISOString()
       }
     });
     
   } catch (error) {
     res.status(500).json({
       success: false,
+      message: 'Erreur génération lien',
       error: error.message
     });
   }
 });
 
-// 8. Récupérer les données pour application desktop (AUTH REQUISE)
-router.get('/sync/get-data', authenticate, async (req, res) => {
+// 8. Téléchargement direct (ADMIN SEULEMENT)
+router.get('/download/:backupId', verifyToken, adminOnly, async (req, res) => {
+  try {
+    const { backupId } = req.params;
+    
+    // Journal de sécurité
+    console.log('🔐 Téléchargement direct backup:', {
+      backupId: backupId,
+      user: req.user.NomUtilisateur,
+      role: req.user.Role,
+      ip: req.ip
+    });
+    
+    // Vérifier l'existence
+    const backups = await backupService.listBackups();
+    const backupExists = backups.some(b => b.id === backupId);
+    
+    if (!backupExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Backup non trouvé'
+      });
+    }
+    
+    res.redirect(`https://drive.google.com/uc?export=download&id=${backupId}`);
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Erreur téléchargement',
+      error: error.message
+    });
+  }
+});
+
+// 9. Statistiques (ADMIN SEULEMENT)
+router.get('/stats', verifyToken, adminOnly, async (req, res) => {
+  try {
+    const backups = await backupService.listBackups();
+    
+    const stats = {
+      total_backups: backups.length,
+      last_backup: backups.length > 0 ? new Date(backups[0].createdTime).toLocaleString('fr-FR') : 'jamais',
+      sql_backups: backups.filter(b => b.name.endsWith('.sql')).length,
+      json_backups: backups.filter(b => b.name.endsWith('.json')).length
+    };
+    
+    res.json({
+      success: true,
+      stats: stats,
+      requestedBy: req.user.NomUtilisateur
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Erreur statistiques',
+      error: error.message
+    });
+  }
+});
+
+// 10. Synchronisation (ADMIN SEULEMENT)
+router.post('/sync/local-export', verifyToken, adminOnly, async (req, res) => {
+  try {
+    console.log('📨 Sync desktop par admin:', req.user.NomUtilisateur);
+    
+    await backupService.executeBackup();
+    
+    res.json({
+      success: true,
+      message: 'Sync et backup réussis',
+      performedBy: req.user.NomUtilisateur
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// 11. Récupération données (ADMIN SEULEMENT)
+router.get('/sync/get-data', verifyToken, adminOnly, async (req, res) => {
   try {
     const client = new (require('pg')).Client({
       connectionString: process.env.DATABASE_URL,
@@ -269,7 +415,6 @@ router.get('/sync/get-data', authenticate, async (req, res) => {
     
     await client.connect();
     
-    // Exporter les tables principales
     const tables = ['cartes', 'utilisateurs', 'journal', 'inventaire'];
     const exportData = {};
     
@@ -283,12 +428,8 @@ router.get('/sync/get-data', authenticate, async (req, res) => {
     res.json({
       success: true,
       data: exportData,
-      timestamp: new Date().toISOString(),
-      tables_exported: tables,
-      row_counts: Object.keys(exportData).reduce((acc, table) => {
-        acc[table] = exportData[table].length;
-        return acc;
-      }, {})
+      exportedBy: req.user.NomUtilisateur,
+      warning: 'Données sensibles - À protéger'
     });
     
   } catch (error) {
@@ -299,132 +440,23 @@ router.get('/sync/get-data', authenticate, async (req, res) => {
   }
 });
 
-// 9. Test simple de Google Drive (PUBLIQUE)
-router.get('/test', async (req, res) => {
-  try {
-    console.log('🧪 Test Google Drive demandé');
-    
-    // Vérifier si les credentials sont configurés
-    if (!process.env.GOOGLE_CLIENT_ID) {
-      return res.status(400).json({
-        success: false,
-        message: 'Google Drive non configuré',
-        advice: 'Ajoutez GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET et GOOGLE_REFRESH_TOKEN sur Render'
-      });
-    }
-    
-    // Tester l'authentification
-    await backupService.authenticate();
-    const folderId = await backupService.getOrCreateBackupFolder();
-    
-    res.json({
-      success: true,
-      message: '✅ Google Drive fonctionnel !',
-      googleDrive: {
-        authenticated: true,
-        folderId: folderId,
-        folderName: 'gescard_backups',
-        configured: true
-      },
-      nextSteps: [
-        'POST /api/backup/create - Créer un backup',
-        'GET /api/backup/list - Voir les backups existants',
-        'GET /api/backup/status - Vérifier le statut'
-      ],
-      environment: {
-        render_tier: process.env.NODE_ENV === 'production' ? 'free' : 'development',
-        backup_auto_restore: process.env.AUTO_RESTORE === 'true'
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Test Google Drive échoué:', error);
-    res.status(500).json({
-      success: false,
-      message: '❌ Google Drive non fonctionnel',
-      error: error.message,
-      commonIssues: [
-        'Les tokens Google peuvent être expirés',
-        'Vérifiez GOOGLE_REFRESH_TOKEN sur Render',
-        'Assurez-vous que l\'API Google Drive est activée'
-      ]
-    });
-  }
-});
+// ==================== FONCTIONS UTILITAIRES ====================
 
-// 10. Route d'information sur le système de backup (PUBLIQUE)
-router.get('/info', async (req, res) => {
-  try {
-    const client = new (require('pg')).Client({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
-    });
-    
-    await client.connect();
-    const countResult = await client.query("SELECT COUNT(*) as total FROM cartes");
-    const totalCartes = parseInt(countResult.rows[0].total);
-    await client.end();
-    
-    const googleDriveConfigured = !!process.env.GOOGLE_CLIENT_ID;
-    
-    res.json({
-      success: true,
-      system: 'GesCard Backup System',
-      version: '1.0.0',
-      status: googleDriveConfigured ? 'active' : 'inactive',
-      
-      database: {
-        total_cartes: totalCartes,
-        connection: 'PostgreSQL',
-        environment: process.env.NODE_ENV || 'development'
-      },
-      
-      backup_system: {
-        google_drive: googleDriveConfigured ? 'configured' : 'not_configured',
-        auto_backup: 'daily at 02:00 UTC',
-        auto_restore: process.env.AUTO_RESTORE === 'true' ? 'enabled' : 'disabled',
-        storage: 'Google Drive (gescard_backups folder)',
-        retention: 'unlimited'
-      },
-      
-      endpoints: {
-        public: {
-          create_backup: 'POST /api/backup/create',
-          list_backups: 'GET /api/backup/list',
-          backup_status: 'GET /api/backup/status',
-          backup_info: 'GET /api/backup/info',
-          test_drive: 'GET /api/backup/test',
-          download_backup: 'GET /api/backup/download/:id'
-        },
-        protected: {
-          restore_backup: 'POST /api/backup/restore (admin only)',
-          sync_export: 'POST /api/backup/sync/local-export',
-          sync_get_data: 'GET /api/backup/sync/get-data'
-        }
-      },
-      
-      recommendations: [
-        totalCartes < 10 ? '⚠️  Base de données presque vide - envisagez une restauration' : '',
-        !googleDriveConfigured ? '⚠️  Configurez Google Drive pour protéger vos données' : '',
-        '✅ Backup automatique quotidien activé',
-        '🔄 Restauration automatique si base vide (Render reset)'
-      ].filter(Boolean),
-      
-      quick_start: [
-        '1. GET /api/backup/test - Tester Google Drive',
-        '2. GET /api/backup/list - Voir les backups existants',
-        '3. POST /api/backup/create - Créer un nouveau backup',
-        '4. GET /api/backup/status - Vérifier l\'état du système'
-      ]
-    });
-    
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Erreur lors de la récupération des informations',
-      error: error.message
-    });
+// Fonction pour le temps relatif (gardez-la)
+function getRelativeTime(date) {
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.round(diffMs / 60000);
+  const diffHours = Math.round(diffMs / 3600000);
+  const diffDays = Math.round(diffMs / 86400000);
+  
+  if (diffMins < 60) return `il y a ${diffMins} minute${diffMins !== 1 ? 's' : ''}`;
+  else if (diffHours < 24) return `il y a ${diffHours} heure${diffHours !== 1 ? 's' : ''}`;
+  else if (diffDays < 7) return `il y a ${diffDays} jour${diffDays !== 1 ? 's' : ''}`;
+  else {
+    const weeks = Math.floor(diffDays / 7);
+    return `il y a ${weeks} semaine${weeks !== 1 ? 's' : ''}`;
   }
-});
+}
 
 module.exports = router;
