@@ -128,7 +128,27 @@ const importExportAccess = (req, res, next) => {
     user: req.user?.nomUtilisateur || req.user?.NomUtilisateur
   });
   
-  // 4. DÉFINIR LES PERMISSIONS PAR RÔLE
+  // 4. DÉTERMINER LE TYPE DE ROUTE
+  const routeType = getRouteType(req.url, req.method);
+  
+  // 5. VÉRIFIER SI LA ROUTE EST ACCESSIBLE À TOUS
+  const publicRoutes = ['public-access'];
+  if (publicRoutes.includes(routeType)) {
+    // ✅ Route publique - accessible à tous les utilisateurs connectés
+    console.log(`✅ Accès public autorisé: ${userRole} - ${routeType}`);
+    req.userPermissions = {
+      role: userRole,
+      normalizedRole: normalizedRole,
+      allowedActions: ['public-access'],
+      limits: {
+        maxFileSize: '10MB',
+        maxRowsPerImport: 0
+      }
+    };
+    return next();
+  }
+  
+  // 6. DÉFINIR LES PERMISSIONS PAR RÔLE (pour les routes non publiques)
   const rolePermissions = {
     'administrateur': {
       allowed: ['import', 'export', 'smart-sync', 'filtered', 'admin', 'stream', 'bulk-import', 'optimized', 'all'],
@@ -169,7 +189,7 @@ const importExportAccess = (req, res, next) => {
     userPerms = rolePermissions['opérateur'];
   }
   
-  // 5. VÉRIFIER SI LE RÔLE EST AUTORISÉ
+  // 7. VÉRIFIER SI LE RÔLE EST AUTORISÉ
   if (!userPerms) {
     console.log('❌ Rôle non autorisé:', userRole);
     return res.status(403).json({ 
@@ -181,9 +201,7 @@ const importExportAccess = (req, res, next) => {
     });
   }
   
-  // 6. VÉRIFIER LES PERMISSIONS SPÉCIFIQUES PAR ROUTE
-  const routeType = getRouteType(req.url, req.method);
-  
+  // 8. VÉRIFIER LES PERMISSIONS SPÉCIFIQUES PAR ROUTE
   if (!userPerms.allowed.includes('all') && !userPerms.allowed.includes(routeType)) {
     console.log(`❌ Permission refusée: ${userRole} ne peut pas ${routeType}`);
     
@@ -207,7 +225,7 @@ const importExportAccess = (req, res, next) => {
     });
   }
   
-  // 7. AJOUTER LES INFORMATIONS DE PERMISSIONS À LA REQUÊTE
+  // 9. AJOUTER LES INFORMATIONS DE PERMISSIONS À LA REQUÊTE
   req.userPermissions = {
     role: userRole,
     normalizedRole: normalizedRole,
@@ -229,6 +247,11 @@ const importExportAccess = (req, res, next) => {
  */
 function getRouteType(url, method) {
   const urlPath = url.toLowerCase();
+  
+  // ✅ AJOUTER CETTE EXCEPTION : /sites accessible à tous les utilisateurs connectés
+  if (urlPath.includes('/sites')) {
+    return 'public-access';
+  }
   
   // Routes bulk import (NOUVEAU)
   if (urlPath.includes('bulk-import')) {
@@ -272,7 +295,6 @@ function getRouteType(url, method) {
   // Export (toutes les autres routes GET/POST d'export)
   if (urlPath.includes('export') || 
       urlPath.includes('template') ||
-      urlPath.includes('sites') ||
       urlPath.includes('stats')) {
     return 'export';
   }
@@ -290,6 +312,7 @@ function getRouteType(url, method) {
  */
 function getRequiredRoleForRoute(routeType) {
   const roleRequirements = {
+    'public-access': ['Administrateur', 'Superviseur', 'Chef d\'équipe', 'Opérateur'], // ✅ Accessible à tous les rôles
     'bulk-import': ['Administrateur', 'Superviseur'],
     'import': ['Administrateur', 'Superviseur'],
     'smart-sync': ['Administrateur', 'Superviseur'],
@@ -319,6 +342,11 @@ const applyRateLimit = (req, res, next) => {
     if (routeType === 'diagnostic' || routeType === 'monitoring') {
       return next();
     }
+  }
+  
+  // Ne pas appliquer le rate limiting aux routes publiques
+  if (routeType === 'public-access') {
+    return next();
   }
   
   // Appliquer le rate limiting

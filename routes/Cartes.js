@@ -112,15 +112,11 @@ const getChanges = async (req, res) => {
 // 🔹 SYNCHRONISATION - RECEVOIR LES DONNÉES
 const syncData = async (req, res) => {
   const pool = await poolPromise;
-  const transaction = new sql.Transaction(pool);
   
   try {
-    await transaction.begin();
-    
     const { donnees, source = 'python_app', batch_id } = req.body;
     
     if (!donnees || !Array.isArray(donnees)) {
-      await transaction.rollback();
       return res.status(400).json({
         success: false,
         error: 'Format invalide',
@@ -157,7 +153,7 @@ const syncData = async (req, res) => {
           WHERE NOM = @nom AND PRENOMS = @prenoms AND [SITE DE RETRAIT] = @siteRetrait
         `;
         
-        const checkRequest = new sql.Request(transaction);
+        const checkRequest = pool.request();
         checkRequest.input('nom', sql.NVarChar(100), nom);
         checkRequest.input('prenoms', sql.NVarChar(100), prenoms);
         checkRequest.input('siteRetrait', sql.NVarChar(255), siteRetrait);
@@ -185,7 +181,7 @@ const syncData = async (req, res) => {
             WHERE ID = @id
           `;
           
-          const updateRequest = new sql.Request(transaction);
+          const updateRequest = pool.request();
           updateRequest.input('lieuEnrolement', sql.NVarChar(255), item["LIEU D'ENROLEMENT"]?.toString().trim() || '');
           updateRequest.input('siteRetrait', sql.NVarChar(255), siteRetrait);
           updateRequest.input('rangement', sql.NVarChar(100), item["RANGEMENT"]?.toString().trim() || '');
@@ -218,7 +214,7 @@ const syncData = async (req, res) => {
             )
           `;
           
-          const insertRequest = new sql.Request(transaction);
+          const insertRequest = pool.request();
           insertRequest.input('lieuEnrolement', sql.NVarChar(255), item["LIEU D'ENROLEMENT"]?.toString().trim() || '');
           insertRequest.input('siteRetrait', sql.NVarChar(255), siteRetrait);
           insertRequest.input('rangement', sql.NVarChar(100), item["RANGEMENT"]?.toString().trim() || '');
@@ -244,8 +240,6 @@ const syncData = async (req, res) => {
       }
     }
 
-    await transaction.commit();
-
     console.log(`✅ Sync réussie: ${imported} nouvelles, ${updated} mises à jour, ${errors} erreurs`);
 
     res.json({
@@ -267,7 +261,6 @@ const syncData = async (req, res) => {
     });
 
   } catch (error) {
-    await transaction.rollback();
     console.error('❌ Erreur syncData:', error);
     res.status(500).json({
       success: false,
@@ -486,7 +479,36 @@ const getCartes = async (req, res) => {
       countQuery += ` AND PRENOMS LIKE @prenom${paramCount}`;
       countRequest.input(`prenom${paramCount}`, sql.NVarChar(100), `%${prenom}%`);
     }
-    // ... autres filtres similaires
+    if (contact) {
+      paramCount++;
+      countQuery += ` AND CONTACT LIKE @contact${paramCount}`;
+      countRequest.input(`contact${paramCount}`, sql.NVarChar(50), `%${contact}%`);
+    }
+    if (siteRetrait) {
+      paramCount++;
+      countQuery += ` AND [SITE DE RETRAIT] LIKE @siteRetrait${paramCount}`;
+      countRequest.input(`siteRetrait${paramCount}`, sql.NVarChar(255), `%${siteRetrait}%`);
+    }
+    if (lieuNaissance) {
+      paramCount++;
+      countQuery += ` AND [LIEU NAISSANCE] LIKE @lieuNaissance${paramCount}`;
+      countRequest.input(`lieuNaissance${paramCount}`, sql.NVarChar(100), `%${lieuNaissance}%`);
+    }
+    if (dateDebut) {
+      paramCount++;
+      countQuery += ` AND [DATE IMPORT] >= @dateDebut${paramCount}`;
+      countRequest.input(`dateDebut${paramCount}`, sql.DateTime, new Date(dateDebut));
+    }
+    if (dateFin) {
+      paramCount++;
+      countQuery += ` AND [DATE IMPORT] <= @dateFin${paramCount}`;
+      countRequest.input(`dateFin${paramCount}`, sql.DateTime, new Date(dateFin + ' 23:59:59'));
+    }
+    if (delivrance) {
+      paramCount++;
+      countQuery += ` AND DELIVRANCE LIKE @delivrance${paramCount}`;
+      countRequest.input(`delivrance${paramCount}`, sql.NVarChar(100), `%${delivrance}%`);
+    }
 
     const countResult = await countRequest.query(countQuery);
     const total = parseInt(countResult.recordset[0].total);
@@ -600,14 +622,169 @@ const getModifications = async (req, res) => {
   }
 };
 
-// 🔹 ROUTES DE L'API DE SYNCHRONISATION ET FUSION INTELLIGENTE
-router.get("/api/health", healthCheck);
-router.get("/api/sync/changes", getChanges);
-router.post("/api/sync", syncData);
-router.get("/api/stats", getStats);
-router.get("/api/sites", getSites);
-router.get("/api/cartes", getCartes);
-router.get("/api/modifications", getModifications);
+// ✅ ROUTE PUT BATCH - CORRIGÉE SANS TRANSACTION
+router.put("/batch", async (req, res) => {
+  try {
+    const { cartes, role } = req.body;
+
+    console.log('🔍 DEBUG batch - Données reçues:', {
+      nombreCartes: cartes?.length || 0,
+      role: role,
+      premiereCarte: cartes && cartes.length > 0 ? cartes[0] : null
+    });
+
+    if (!Array.isArray(cartes) || cartes.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Aucune carte reçue",
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    if (!role) {
+      return res.status(403).json({ 
+        success: false, 
+        error: "Rôle manquant",
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Normalisation du rôle
+    const roleNormalise = (role || "").toLowerCase().trim();
+    if (roleNormalise === "operateur" || roleNormalise === "opérateur") {
+      return res.status(403).json({
+        success: false,
+        error: "Opérateurs non autorisés à modifier les cartes",
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const pool = await poolPromise;
+    
+    let cartesModifiees = 0;
+    let cartesIgnorees = 0;
+    const detailsModifications = [];
+    const erreurs = [];
+
+    for (const carte of cartes) {
+      try {
+        // Identifier l'ID de la carte
+        const carteId = carte.ID || carte.id || carte.Id;
+        
+        if (!carteId) {
+          erreurs.push(`Carte sans ID: ${carte.NOM || carte.nom} ${carte.PRENOMS || carte.prenoms}`);
+          cartesIgnorees++;
+          continue;
+        }
+
+        const idNumerique = Number(carteId);
+        if (isNaN(idNumerique) || idNumerique <= 0) {
+          erreurs.push(`ID invalide: ${carteId} pour ${carte.NOM || carte.nom}`);
+          cartesIgnorees++;
+          continue;
+        }
+
+        // Vérifier si la carte existe
+        const checkRequest = pool.request();
+        checkRequest.input("id", sql.Int, idNumerique);
+        const checkResult = await checkRequest.query("SELECT COUNT(*) as count FROM Cartes WHERE ID = @id");
+        
+        if (checkResult.recordset[0].count === 0) {
+          erreurs.push(`Carte ID ${idNumerique} non trouvée`);
+          cartesIgnorees++;
+          continue;
+        }
+
+        // ✅ FORMATER LES DONNÉES POUR LA MISE À JOUR
+        const query = `
+          UPDATE Cartes 
+          SET [LIEU D'ENROLEMENT] = @lieuEnrolement,
+              [SITE DE RETRAIT] = @siteRetrait,
+              RANGEMENT = @rangement,
+              NOM = @nom,
+              PRENOMS = @prenoms,
+              [DATE DE NAISSANCE] = @dateNaissance,
+              [LIEU NAISSANCE] = @lieuNaissance,
+              CONTACT = @contact,
+              DELIVRANCE = @delivrance,
+              [CONTACT DE RETRAIT] = @contactRetrait,
+              [DATE DE DELIVRANCE] = @dateDelivrance,
+              [DATE IMPORT] = @dateImport
+          WHERE ID = @id
+        `;
+
+        const request = pool.request();
+        
+        // Récupérer les valeurs des deux formats possibles (majuscules/minuscules)
+        const nom = carte.NOM || carte.nom || '';
+        const prenoms = carte.PRENOMS || carte.prenoms || '';
+        const delivrance = carte.DELIVRANCE || carte.delivrance || '';
+        
+        request.input("lieuEnrolement", sql.NVarChar(255), carte["LIEU D'ENROLEMENT"] || '');
+        request.input("siteRetrait", sql.NVarChar(255), carte["SITE DE RETRAIT"] || '');
+        request.input("rangement", sql.NVarChar(100), carte.RANGEMENT || carte.rangement || '');
+        request.input("nom", sql.NVarChar(100), nom);
+        request.input("prenoms", sql.NVarChar(100), prenoms);
+        request.input("dateNaissance", sql.NVarChar(50), carte["DATE DE NAISSANCE"] || '');
+        request.input("lieuNaissance", sql.NVarChar(100), carte["LIEU NAISSANCE"] || '');
+        request.input("contact", sql.NVarChar(50), carte.CONTACT || carte.contact || '');
+        request.input("delivrance", sql.NVarChar(100), delivrance);
+        request.input("contactRetrait", sql.NVarChar(50), carte["CONTACT DE RETRAIT"] || '');
+        request.input("dateDelivrance", sql.NVarChar(50), carte["DATE DE DELIVRANCE"] || '');
+        request.input("dateImport", sql.DateTime, new Date());
+        request.input("id", sql.Int, idNumerique);
+
+        const result = await request.query(query);
+
+        if (result.rowsAffected[0] > 0) {
+          cartesModifiees++;
+          detailsModifications.push(`ID ${idNumerique}: ${nom} ${prenoms} - DELIVRANCE: "${delivrance}"`);
+          
+          // Journalisation
+          await ajouterAuJournal(
+            req.user?.username || role,
+            `Modification batch carte ID ${idNumerique}: ${nom} ${prenoms} - DELIVRANCE: "${delivrance}"`
+          );
+          
+          console.log(`✅ Carte ${idNumerique} mise à jour: ${nom} ${prenoms} - DELIVRANCE: "${delivrance}"`);
+        }
+
+      } catch (error) {
+        const carteId = carte.ID || carte.id || 'inconnu';
+        erreurs.push(`ID ${carteId}: ${error.message}`);
+        cartesIgnorees++;
+        console.error(`❌ Erreur carte ${carteId}:`, error.message);
+      }
+    }
+
+    console.log("✅ Mise à jour batch terminée:", {
+      modifiees: cartesModifiees,
+      ignorees: cartesIgnorees,
+      total: cartes.length,
+    });
+
+    res.json({
+      success: true,
+      message: `${cartesModifiees} cartes mises à jour avec succès`,
+      details: {
+        modifiees: cartesModifiees,
+        ignorees: cartesIgnorees,
+        total: cartes.length,
+        modifications: detailsModifications,
+        erreurs: erreurs.slice(0, 5) // Limiter les erreurs affichées
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error("❌ Erreur PUT /cartes/batch:", error);
+    res.status(500).json({
+      success: false,
+      error: "Erreur lors de la mise à jour des cartes: " + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
 
 // ✅ ROUTES CRUD POUR L'APPLICATION WEB (MSSQL)
 router.get("/", async (req, res) => {
@@ -812,149 +989,6 @@ router.post("/", async (req, res) => {
   }
 });
 
-// ✅ ROUTE PUT BATCH - avant /:id pour éviter les conflits
-router.put("/batch", async (req, res) => {
-  try {
-    const { cartes, role } = req.body;
-
-    if (!Array.isArray(cartes) || cartes.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: "Aucune carte reçue",
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    if (!role) {
-      return res.status(403).json({ 
-        success: false, 
-        error: "Rôle manquant",
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    // Normalisation du rôle
-    const roleNormalise = (role || "").toLowerCase().trim();
-    if (roleNormalise === "operateur" || roleNormalise === "opérateur") {
-      return res.status(403).json({
-        success: false,
-        error: "Opérateurs non autorisés à modifier les cartes",
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    const pool = await poolPromise;
-    const transaction = new sql.Transaction(pool);
-    await transaction.begin();
-
-    try {
-      let cartesModifiees = 0;
-      const detailsModifications = [];
-
-      // Filtrer les cartes valides
-      const cartesValides = cartes.filter((carte) => {
-        if (!carte.ID) {
-          console.warn("⚠️ Carte sans ID ignorée:", carte.NOM);
-          return false;
-        }
-
-        const idNumber = Number(carte.ID);
-        const idValide = !isNaN(idNumber) && idNumber > 0;
-
-        if (!idValide) {
-          console.warn("⚠️ Carte ignorée (ID invalide):", {
-            id: carte.ID,
-            nom: carte.NOM,
-          });
-        }
-        return idValide;
-      });
-
-      console.log(`📥 ${cartesValides.length}/${cartes.length} cartes valides à traiter`);
-
-      for (const carte of cartesValides) {
-        const idNumerique = Number(carte.ID);
-
-        const query = `
-          UPDATE dbo.Cartes 
-          SET [LIEU D'ENROLEMENT] = @lieuEnrolement,
-              [SITE DE RETRAIT] = @siteRetrait,
-              RANGEMENT = @rangement,
-              NOM = @nom,
-              PRENOMS = @prenoms,
-              [DATE DE NAISSANCE] = @dateNaissance,
-              [LIEU NAISSANCE] = @lieuNaissance,
-              CONTACT = @contact,
-              DELIVRANCE = @delivrance,
-              [CONTACT DE RETRAIT] = @contactRetrait,
-              [DATE DE DELIVRANCE] = @dateDelivrance,
-              [DATE IMPORT] = @dateImport
-          WHERE ID = @id
-        `;
-
-        const request = new sql.Request(transaction);
-        request.input("lieuEnrolement", sql.NVarChar(255), carte["LIEU D'ENROLEMENT"] || "");
-        request.input("siteRetrait", sql.NVarChar(255), carte["SITE DE RETRAIT"] || "");
-        request.input("rangement", sql.NVarChar(100), carte.RANGEMENT || "");
-        request.input("nom", sql.NVarChar(100), carte.NOM || "");
-        request.input("prenoms", sql.NVarChar(100), carte.PRENOMS || "");
-        request.input("dateNaissance", sql.NVarChar(50), carte["DATE DE NAISSANCE"] || "");
-        request.input("lieuNaissance", sql.NVarChar(100), carte["LIEU NAISSANCE"] || "");
-        request.input("contact", sql.NVarChar(50), carte.CONTACT || "");
-        request.input("delivrance", sql.NVarChar(100), carte.DELIVRANCE || "");
-        request.input("contactRetrait", sql.NVarChar(50), carte["CONTACT DE RETRAIT"] || "");
-        request.input("dateDelivrance", sql.NVarChar(50), carte["DATE DE DELIVRANCE"] || "");
-        request.input("dateImport", sql.DateTime, new Date());
-        request.input("id", sql.Int, idNumerique);
-
-        const result = await request.query(query);
-
-        if (result.rowsAffected[0] > 0) {
-          cartesModifiees++;
-          detailsModifications.push(`ID ${idNumerique}: ${carte.NOM} ${carte.PRENOMS}`);
-          
-          await ajouterAuJournal(
-            role,
-            `Modification carte ID ${idNumerique}: ${carte.NOM} ${carte.PRENOMS}`,
-            transaction
-          );
-        }
-      }
-
-      await transaction.commit();
-
-      console.log("✅ Mise à jour batch terminée:", {
-        modifiees: cartesModifiees,
-        ignorees: cartes.length - cartesValides.length,
-        total: cartes.length,
-      });
-
-      res.json({
-        success: true,
-        message: `${cartesModifiees} cartes mises à jour avec succès`,
-        details: {
-          modifiees: cartesModifiees,
-          ignorees: cartes.length - cartesValides.length,
-          total: cartes.length,
-          modifications: detailsModifications
-        },
-        timestamp: new Date().toISOString()
-      });
-    } catch (error) {
-      await transaction.rollback();
-      console.error("❌ Erreur transaction:", error);
-      throw error;
-    }
-  } catch (error) {
-    console.error("❌ Erreur PUT /cartes/batch:", error);
-    res.status(500).json({
-      success: false,
-      error: "Erreur lors de la mise à jour des cartes: " + error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -1110,35 +1144,32 @@ router.get("/test/connection", async (req, res) => {
 });
 
 // ✅ Fonction de journalisation
-const ajouterAuJournal = async (utilisateur, action, transaction = null) => {
+const ajouterAuJournal = async (utilisateur, action) => {
   try {
-    if (transaction) {
-      const request = new sql.Request(transaction);
-      request.input("utilisateur", sql.NVarChar(100), utilisateur);
-      request.input("action", sql.NVarChar(500), action);
-      request.input("date", sql.DateTime, new Date());
-
-      await request.query(`
+    const pool = await poolPromise;
+    await pool
+      .request()
+      .input("utilisateur", sql.NVarChar(100), utilisateur)
+      .input("action", sql.NVarChar(500), action)
+      .input("date", sql.DateTime, new Date())
+      .query(`
         INSERT INTO journal (utilisateur, action, date)
         VALUES (@utilisateur, @action, @date)
       `);
-    } else {
-      const pool = await poolPromise;
-      await pool
-        .request()
-        .input("utilisateur", sql.NVarChar(100), utilisateur)
-        .input("action", sql.NVarChar(500), action)
-        .input("date", sql.DateTime, new Date())
-        .query(`
-          INSERT INTO journal (utilisateur, action, date)
-          VALUES (@utilisateur, @action, @date)
-        `);
-    }
     
     console.log(`📝 Journal: ${utilisateur} - ${action}`);
   } catch (error) {
     console.error("❌ Erreur journalisation:", error);
   }
 };
+
+// 🔹 ROUTES DE L'API DE SYNCHRONISATION ET FUSION INTELLIGENTE
+router.get("/api/health", healthCheck);
+router.get("/api/sync/changes", getChanges);
+router.post("/api/sync", syncData);
+router.get("/api/stats", getStats);
+router.get("/api/sites", getSites);
+router.get("/api/cartes", getCartes);
+router.get("/api/modifications", getModifications);
 
 module.exports = router;
