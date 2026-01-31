@@ -171,11 +171,11 @@ exports.createUser = async (req, res) => {
     const result = await client.query(`
       INSERT INTO utilisateurs 
       (nomutilisateur, nomcomplet, email, agence, role, motdepasse, datecreation, actif)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING id
-    `, [NomUtilisateur, NomComplet, Email, Agence, Role, hashedPassword, new Date(), true]);
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+      RETURNING id, nomutilisateur, nomcomplet, email, agence, role, datecreation, actif
+    `, [NomUtilisateur, NomComplet, Email, Agence, Role, hashedPassword, true]);
 
-    const newUserId = result.rows[0].id;
+    const newUser = result.rows[0];
 
     // Journaliser la création
     await journalController.logAction({
@@ -187,7 +187,7 @@ exports.createUser = async (req, res) => {
       action: `Création utilisateur: ${NomUtilisateur}`,
       actionType: "CREATE_USER",
       tableName: "Utilisateurs",
-      recordId: newUserId.toString(),
+      recordId: newUser.id.toString(),
       details: `Nouvel utilisateur créé: ${NomComplet} (${Role})`
     });
 
@@ -195,7 +195,7 @@ exports.createUser = async (req, res) => {
 
     res.status(201).json({ 
       message: "Utilisateur créé avec succès", 
-      userId: newUserId 
+      user: newUser 
     });
 
   } catch (error) {
@@ -243,19 +243,19 @@ exports.updateUser = async (req, res) => {
       }
     }
 
-    await client.query(`
+    // Mettre à jour l'utilisateur
+    const result = await client.query(`
       UPDATE utilisateurs 
-      SET nomcomplet = $1, email = $2, agence = $3, role = $4, actif = $5
+      SET nomcomplet = COALESCE($1, nomcomplet), 
+          email = COALESCE($2, email), 
+          agence = COALESCE($3, agence), 
+          role = COALESCE($4, role), 
+          actif = COALESCE($5, actif)
       WHERE id = $6
-    `, [NomComplet, Email, Agence, Role, Actif ? true : false, id]);
+      RETURNING id, nomutilisateur, nomcomplet, email, agence, role, datecreation, actif
+    `, [NomComplet, Email, Agence, Role, Actif, id]);
 
-    // Récupérer le nouveau profil
-    const newUserResult = await client.query(
-      'SELECT * FROM utilisateurs WHERE id = $1',
-      [id]
-    );
-
-    const newUser = newUserResult.rows[0];
+    const updatedUser = result.rows[0];
 
     // Journaliser la modification
     await journalController.logAction({
@@ -276,18 +276,21 @@ exports.updateUser = async (req, res) => {
         actif: oldUser.actif
       }),
       newValue: JSON.stringify({
-        nomComplet: newUser.nomcomplet,
-        email: newUser.email,
-        agence: newUser.agence,
-        role: newUser.role,
-        actif: newUser.actif
+        nomComplet: updatedUser.nomcomplet,
+        email: updatedUser.email,
+        agence: updatedUser.agence,
+        role: updatedUser.role,
+        actif: updatedUser.actif
       }),
       details: `Utilisateur modifié: ${NomComplet}`
     });
 
     await client.query('COMMIT');
 
-    res.json({ message: "Utilisateur modifié avec succès" });
+    res.json({ 
+      message: "Utilisateur modifié avec succès",
+      user: updatedUser 
+    });
 
   } catch (error) {
     await client.query('ROLLBACK');
@@ -750,6 +753,233 @@ exports.verifyToken = async (req, res) => {
     });
   } catch (error) {
     console.error("Erreur vérification token:", error);
+    res.status(500).json({ message: "Erreur serveur", error });
+  }
+};
+
+// ==================== FONCTIONS ADDITIONNELLES POUR FRONTEND ====================
+
+// Récupérer les utilisateurs avec pagination
+exports.getUsersPaginated = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, sortBy = 'nomcomplet', sortOrder = 'asc' } = req.query;
+    const offset = (page - 1) * limit;
+
+    // Validation des paramètres de tri
+    const validSortColumns = ['nomcomplet', 'nomutilisateur', 'email', 'role', 'datecreation', 'actif'];
+    const validSortOrders = ['asc', 'desc'];
+    
+    const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'nomcomplet';
+    const order = validSortOrders.includes(sortOrder.toLowerCase()) ? sortOrder.toUpperCase() : 'ASC';
+
+    // Requête principale
+    const result = await db.query(`
+      SELECT id, nomutilisateur, nomcomplet, email, agence, role, datecreation, actif 
+      FROM utilisateurs 
+      ORDER BY ${sortColumn} ${order}
+      LIMIT $1 OFFSET $2
+    `, [parseInt(limit), offset]);
+
+    // Compter le total
+    const countResult = await db.query('SELECT COUNT(*) as total FROM utilisateurs');
+    const total = parseInt(countResult.rows[0].total);
+
+    res.json({
+      users: result.rows,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalItems: total,
+        itemsPerPage: parseInt(limit)
+      }
+    });
+
+  } catch (error) {
+    console.error("Erreur récupération utilisateurs paginés:", error);
+    res.status(500).json({ message: "Erreur serveur", error });
+  }
+};
+
+// Mettre à jour le profil utilisateur (pour l'utilisateur lui-même)
+exports.updateProfile = async (req, res) => {
+  const client = await db.getClient();
+  
+  try {
+    await client.query('BEGIN');
+    
+    const { NomComplet, Email, Agence } = req.body;
+    const userId = req.user.id;
+
+    // Récupérer l'ancien profil
+    const oldUserResult = await client.query(
+      'SELECT * FROM utilisateurs WHERE id = $1',
+      [userId]
+    );
+
+    const oldUser = oldUserResult.rows[0];
+    
+    if (!oldUser) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: "Utilisateur non trouvé" });
+    }
+
+    // Vérifier si l'email existe déjà pour un autre utilisateur
+    if (Email && Email !== oldUser.email) {
+      const existingEmail = await client.query(
+        'SELECT id FROM utilisateurs WHERE email = $1 AND id != $2',
+        [Email, userId]
+      );
+
+      if (existingEmail.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: "Cet email est déjà utilisé par un autre utilisateur" });
+      }
+    }
+
+    // Mettre à jour le profil
+    const result = await client.query(`
+      UPDATE utilisateurs 
+      SET nomcomplet = COALESCE($1, nomcomplet), 
+          email = COALESCE($2, email), 
+          agence = COALESCE($3, agence)
+      WHERE id = $4
+      RETURNING id, nomutilisateur, nomcomplet, email, agence, role, datecreation, actif
+    `, [NomComplet, Email, Agence, userId]);
+
+    const updatedUser = result.rows[0];
+
+    // Journaliser la modification du profil
+    await journalController.logAction({
+      utilisateurId: userId,
+      nomUtilisateur: req.user.NomUtilisateur,
+      nomComplet: req.user.NomComplet,
+      role: req.user.Role,
+      agence: req.user.Agence,
+      action: "Mise à jour du profil",
+      actionType: "UPDATE_PROFILE",
+      tableName: "Utilisateurs",
+      recordId: userId.toString(),
+      details: "Profil utilisateur mis à jour"
+    });
+
+    await client.query('COMMIT');
+
+    res.json({ 
+      message: "Profil mis à jour avec succès",
+      user: updatedUser 
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error("Erreur mise à jour profil:", error);
+    res.status(500).json({ message: "Erreur serveur", error });
+  } finally {
+    client.release();
+  }
+};
+
+// Changer le mot de passe (pour l'utilisateur lui-même)
+exports.changePassword = async (req, res) => {
+  const client = await db.getClient();
+  
+  try {
+    await client.query('BEGIN');
+    
+    const { currentPassword, newPassword } = req.body;
+    const userId = req.user.id;
+
+    // Récupérer l'utilisateur
+    const userResult = await client.query(
+      'SELECT * FROM utilisateurs WHERE id = $1',
+      [userId]
+    );
+
+    const user = userResult.rows[0];
+    
+    if (!user) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: "Utilisateur non trouvé" });
+    }
+
+    // Vérifier l'ancien mot de passe
+    const isMatch = await bcrypt.compare(currentPassword, user.motdepasse);
+    if (!isMatch) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: "Mot de passe actuel incorrect" });
+    }
+
+    // Hasher le nouveau mot de passe
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    await client.query(
+      'UPDATE utilisateurs SET motdepasse = $1 WHERE id = $2',
+      [hashedPassword, userId]
+    );
+
+    // Journaliser le changement de mot de passe
+    await journalController.logAction({
+      utilisateurId: userId,
+      nomUtilisateur: req.user.NomUtilisateur,
+      nomComplet: req.user.NomComplet,
+      role: req.user.Role,
+      agence: req.user.Agence,
+      action: "Changement de mot de passe",
+      actionType: "CHANGE_PASSWORD",
+      tableName: "Utilisateurs",
+      recordId: userId.toString(),
+      details: "Mot de passe modifié par l'utilisateur"
+    });
+
+    await client.query('COMMIT');
+
+    res.json({ message: "Mot de passe changé avec succès" });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error("Erreur changement mot de passe:", error);
+    res.status(500).json({ message: "Erreur serveur", error });
+  } finally {
+    client.release();
+  }
+};
+
+// Récupérer les utilisateurs par rôle
+exports.getUsersByRole = async (req, res) => {
+  try {
+    const { role } = req.params;
+    
+    const result = await db.query(`
+      SELECT id, nomutilisateur, nomcomplet, email, agence, role, datecreation, actif 
+      FROM utilisateurs 
+      WHERE role = $1 AND actif = true
+      ORDER BY nomcomplet
+    `, [role]);
+
+    res.json(result.rows);
+
+  } catch (error) {
+    console.error("Erreur récupération utilisateurs par rôle:", error);
+    res.status(500).json({ message: "Erreur serveur", error });
+  }
+};
+
+// Vérifier si l'utilisateur est administrateur
+exports.checkAdmin = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const result = await db.query(
+      'SELECT role FROM utilisateurs WHERE id = $1',
+      [userId]
+    );
+
+    const isAdmin = result.rows.length > 0 && result.rows[0].role === 'admin';
+
+    res.json({ isAdmin });
+
+  } catch (error) {
+    console.error("Erreur vérification admin:", error);
     res.status(500).json({ message: "Erreur serveur", error });
   }
 };

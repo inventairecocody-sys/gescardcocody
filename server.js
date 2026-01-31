@@ -9,6 +9,10 @@ dotenv.config();
 
 const { query, isRenderFreeTier } = require("./db/db");
 
+// Import des middlewares
+const auth = require("./middleware/auth");
+const adminOnly = require("./middleware/adminOnly");
+
 // Import des routes
 const authRoutes = require("./routes/authRoutes");
 const cartesRoutes = require("./routes/Cartes");
@@ -596,7 +600,7 @@ app.get("/api/health", async (req, res) => {
       backup_system: {
         status: backupStatus,
         google_drive: googleDriveStatus,
-        auto_backup: 'daily_at_13h30_UTC', // ⭐ MODIFICATION ICI
+        auto_backup: 'daily_at_13h30_UTC',
         auto_restore: process.env.AUTO_RESTORE === 'true' ? 'enabled' : 'disabled',
         endpoints: {
           create_backup: '/api/backup/create',
@@ -672,7 +676,7 @@ app.get("/api/debug/external", async (req, res) => {
     let backupInfo = {
       configured: process.env.GOOGLE_CLIENT_ID ? true : false,
       auto_restore: process.env.AUTO_RESTORE === 'true',
-      next_backup: '13:30 UTC daily' // ⭐ MODIFICATION ICI
+      next_backup: '13:30 UTC daily'
     };
     
     if (process.env.GOOGLE_CLIENT_ID) {
@@ -727,7 +731,7 @@ app.get("/api/debug/external", async (req, res) => {
         export_complet_limit: '3/heure',
         import_timeout: '4min',
         export_timeout: '5-10min pour complet',
-        backup_auto: 'daily à 13h30 UTC', // ⭐ MODIFICATION ICI
+        backup_auto: 'daily à 13h30 UTC',
         advice: [
           `Vous avez ${totalCartes.toLocaleString()} cartes`,
           'Utilisez /export/all pour le format optimal',
@@ -742,7 +746,7 @@ app.get("/api/debug/external", async (req, res) => {
         export_complet_limit: '10/heure',
         import_timeout: '5min',
         export_timeout: '10min pour complet',
-        backup_auto: 'daily à 13h30 UTC', // ⭐ MODIFICATION ICI
+        backup_auto: 'daily à 13h30 UTC',
         advice: [
           `Vous avez ${totalCartes.toLocaleString()} cartes`,
           'Utilisez /export/all pour le format optimal',
@@ -798,7 +802,54 @@ app.get("/api/cors-test", (req, res) => {
   });
 });
 
+// ========== ROUTES DE TEST POUR UTILISATEURS ==========
+
+// Route pour tester la connexion DB et les utilisateurs
+app.get("/api/test-users", async (req, res) => {
+  try {
+    // Tester la table utilisateurs
+    const usersResult = await query("SELECT COUNT(*) as count FROM utilisateurs");
+    const rolesResult = await query("SELECT DISTINCT role FROM utilisateurs ORDER BY role");
+    
+    res.json({
+      success: true,
+      database: {
+        total_users: parseInt(usersResult.rows[0].count),
+        available_roles: rolesResult.rows.map(r => r.role),
+        timestamp: new Date().toISOString()
+      },
+      auth_system: {
+        login_endpoint: '/api/utilisateurs/login',
+        check_token: '/api/utilisateurs/verify',
+        user_management: '/api/utilisateurs (admin only)'
+      },
+      test_accounts: {
+        admin: "Utilisez un compte avec role='Administrateur'",
+        operator: "Utilisez un compte avec role='Opérateur'"
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      advice: "Vérifiez que la table 'utilisateurs' existe dans votre base de données"
+    });
+  }
+});
+
 // ========== MONTAGE DES ROUTES PRINCIPALES ==========
+console.log('📁 Montage des routes...');
+
+// Route de test simple pour vérifier que le serveur répond
+app.get("/api/test", (req, res) => {
+  res.json({ 
+    message: "API CartesProject fonctionnelle",
+    version: "3.0.0",
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Mount routes
 app.use("/api/auth", authRoutes);
 app.use("/api/utilisateurs", utilisateursRoutes);
 app.use("/api/cartes", cartesRoutes);
@@ -812,6 +863,8 @@ app.use("/api/external", externalApiRoutes);
 
 // 🆕 ROUTE DE BACKUP
 app.use("/api/backup", backupRoutes);
+
+console.log('✅ Routes montées avec succès');
 
 // ========== ROUTE RACINE AMÉLIORÉE ==========
 app.get("/", (req, res) => {
@@ -848,7 +901,7 @@ app.get("/", (req, res) => {
     note_importante: [
       "Les exports complets peuvent prendre plusieurs minutes pour les gros volumes de données",
       ...(hasBackup ? [
-        "✅ Backup automatique activé (tous les jours à 13h30 UTC)", // ⭐ MODIFICATION ICI
+        "✅ Backup automatique activé (tous les jours à 13h30 UTC)",
         "✅ Restauration automatique si base vide",
         "📁 Sauvegardes stockées sur Google Drive"
       ] : [
@@ -881,6 +934,11 @@ app.use((req, res) => {
       '/api/backup/restore (restaurer)',
       '/api/backup/list (lister backups)',
       '/api/backup/status (statut)'
+    ],
+    user_routes: [
+      '/api/utilisateurs/login (connexion)',
+      '/api/utilisateurs (gestion utilisateurs - admin)',
+      '/api/utilisateurs/profile (mon profil)'
     ]
   });
 });
@@ -925,12 +983,15 @@ app.use((err, req, res, next) => {
   if (err.code === 'ETIMEDOUT' || err.message.includes('timeout')) {
     const isExportComplete = req.url.includes('/export/complete') || req.url.includes('/export/all');
     const isBackupOperation = req.url.includes('/api/backup');
+    const isUserOperation = req.url.includes('/api/utilisateurs');
     
     return res.status(504).json({
       success: false,
       message: "Request timeout",
       error: "The operation took too long to complete",
-      request_type: isExportComplete ? "Export complet" : isBackupOperation ? "Backup" : "Normal",
+      request_type: isExportComplete ? "Export complet" : 
+                    isBackupOperation ? "Backup" : 
+                    isUserOperation ? "Gestion utilisateur" : "Normal",
       request_id: req.requestId,
       advice: isExportComplete ? [
         "L'export complet de toutes les données prend du temps",
@@ -942,6 +1003,10 @@ app.use((err, req, res, next) => {
         "Le backup continue en arrière-plan",
         "Vérifiez les logs pour la progression",
         "Les backups sont automatiques, vous pouvez réessayer plus tard"
+      ] : isUserOperation ? [
+        "La gestion des utilisateurs est optimisée pour la performance",
+        "Vérifiez la connexion à la base de données",
+        "Contactez l'administrateur si le problème persiste"
       ] : isRenderFreeTier ? [
         "Try splitting your file into smaller parts",
         "Use /bulk-import for large files",
@@ -1027,6 +1092,24 @@ app.use((err, req, res, next) => {
     });
   }
   
+  // Erreur d'authentification/autorisation
+  if (err.message && (err.message.includes('authentification') || err.message.includes('autorisation') || 
+      err.message.includes('token') || err.message.includes('jwt') || 
+      err.message.includes('admin'))) {
+    return res.status(401).json({
+      success: false,
+      message: "Authentication/Authorization error",
+      error: err.message,
+      request_id: req.requestId,
+      advice: [
+        "Vérifiez que vous êtes connecté",
+        "Vérifiez que votre token JWT est valide",
+        "Les routes admin sont réservées aux administrateurs",
+        "Utilisez /api/utilisateurs/login pour vous reconnecter"
+      ]
+    });
+  }
+  
   // Erreur générique
   const errorResponse = {
     success: false,
@@ -1087,8 +1170,9 @@ if (isRenderFreeTier) {
 }
 
 // ========== LANCEMENT DU SERVEUR ==========
-const server = app.listen(PORT, async () => {
-  console.log(`🚀 Server started on port ${PORT}`);
+const HOST = '0.0.0.0'; // CRITIQUE POUR RENDER
+const server = app.listen(PORT, HOST, async () => {
+  console.log(`🚀 Server started on ${HOST}:${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`💾 Render tier: ${isRenderFreeTier ? 'FREE (512MB)' : 'PAID'}`);
   
@@ -1106,8 +1190,15 @@ const server = app.listen(PORT, async () => {
   console.log('• ⚡ /api/import-export/export/complete/csv - CSV complet');
   console.log('• 🎯 Timeouts adaptatifs: 5-10min pour les exports complets');
   
+  console.log('\n👤 GESTION DES UTILISATEURS:');
+  console.log('• ✅ /api/utilisateurs/login - Connexion');
+  console.log('• 📋 /api/utilisateurs - Liste utilisateurs (admin)');
+  console.log('• ➕ /api/utilisateurs - Créer utilisateur (admin)');
+  console.log('• ✏️ /api/utilisateurs/profile - Mon profil');
+  console.log('• 🔑 /api/utilisateurs/change-password - Changer mot de passe');
+  
   console.log('\n🔐 NOUVELLES FONCTIONNALITÉS DE BACKUP:');
-  console.log('• ✅ Backup automatique quotidien (13h30 UTC - heure d\'Abidjan)'); // ⭐ MODIFICATION ICI
+  console.log('• ✅ Backup automatique quotidien (13h30 UTC - heure d\'Abidjan)');
   console.log('• 🔄 Restauration automatique si base vide');
   console.log('• 📁 Stockage sur Google Drive (dossier "gescard_backups")');
   console.log('• 🔧 Routes: /api/backup/create, /api/backup/list, /api/backup/restore');
@@ -1134,12 +1225,26 @@ const server = app.listen(PORT, async () => {
     console.log('• Monitor progress via logs and response headers');
     console.log('• Check /api/debug/external for system status');
     console.log('• Limit complete exports to 3 per hour');
+    console.log('\n👤 USER MANAGEMENT:');
+    console.log('• Login: /api/utilisateurs/login');
+    console.log('• Check token: /api/utilisateurs/verify');
+    console.log('• User list: /api/utilisateurs (admin only)');
+    console.log('• Create user: POST /api/utilisateurs (admin only)');
+    console.log('• Profile: /api/utilisateurs/profile');
     console.log('\n💾 BACKUP SYSTEM INFO:');
     console.log('• Backups are stored in Google Drive folder "gescard_backups"');
-    console.log('• Automatic backup every day at 13:30 UTC (heure d\'Abidjan)'); // ⭐ MODIFICATION ICI
+    console.log('• Automatic backup every day at 13:30 UTC (heure d\'Abidjan)');
     console.log('• Auto-restore if database is empty (Render monthly reset)');
     console.log('• Check /api/backup/status for backup system health');
     console.log('• Use /api/backup/create for manual backup');
+  }
+  
+  // Tester la connexion DB
+  try {
+    const testResult = await query("SELECT 1 as ok");
+    console.log(`✅ Database connection: OK`);
+  } catch (error) {
+    console.error(`❌ Database connection failed: ${error.message}`);
   }
 });
 
